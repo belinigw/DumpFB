@@ -3,7 +3,7 @@ from tkinter import messagebox
 import json
 import threading
 from dump import executar_dump
-from db_firebird import conectar_firebird
+from db_firebird import conectar_firebird, listar_tabelas_firebird
 from db_mssql import conectar_mssql
 
 CONFIG_PATH = "config.json"
@@ -20,22 +20,36 @@ def escrever_saida(caixa_saida, texto):
     caixa_saida.insert(tk.END, texto + "\n")
     caixa_saida.see(tk.END)
 
-def executar_migracao(entry_tabela, caixa_saida):
-    tabela = entry_tabela.get().strip()
-    if not tabela:
-        escrever_saida(caixa_saida, "[ERRO] Informe o nome da tabela.")
+def obter_tabelas_selecionadas(entry_tabela, listbox_tabelas):
+    selecionadas = [listbox_tabelas.get(i) for i in listbox_tabelas.curselection()]
+    manual = entry_tabela.get().strip()
+    if not selecionadas and manual:
+        selecionadas = [manual]
+    return selecionadas
+
+
+def executar_migracao(entry_tabela, listbox_tabelas, caixa_saida):
+    tabelas = obter_tabelas_selecionadas(entry_tabela, listbox_tabelas)
+    if not tabelas:
+        escrever_saida(caixa_saida, "[ERRO] Selecione ou informe ao menos uma tabela para migrar.")
         return
 
     def run():
         try:
             config = carregar_config()
-            escrever_saida(caixa_saida, f"🔄 Iniciando migração da tabela '{tabela}'...")
-            total, tempo = executar_dump(tabela, config, log_fn=lambda msg: escrever_saida(caixa_saida, msg))
-            escrever_saida(caixa_saida, f"✅ Migração concluída: {total} registros em {tempo:.2f} segundos.")
+            for tabela in tabelas:
+                escrever_saida(caixa_saida, f"🔄 Iniciando migração da tabela '{tabela}'...")
+                total, tempo = executar_dump(
+                    tabela,
+                    config,
+                    log_fn=lambda msg, tabela=tabela: escrever_saida(caixa_saida, f"[{tabela}] {msg}")
+                )
+                escrever_saida(caixa_saida, f"✅ Migração da tabela '{tabela}' concluída: {total} registros em {tempo:.2f} segundos.")
+            escrever_saida(caixa_saida, "🚀 Processo finalizado para todas as tabelas selecionadas.")
         except Exception as e:
             escrever_saida(caixa_saida, f"[ERRO] {e}")
 
-    threading.Thread(target=run).start()
+    threading.Thread(target=run, daemon=True).start()
 
 def testar_conexao_firebird(caixa_saida):
     try:
@@ -55,34 +69,76 @@ def testar_conexao_mssql(caixa_saida):
     except Exception as e:
         escrever_saida(caixa_saida, f"[ERRO] MSSQL: {e}")
 
-def contar_registros(entry_tabela, caixa_saida):
-    tabela = entry_tabela.get().strip()
-    if not tabela:
-        escrever_saida(caixa_saida, "[ERRO] Informe a tabela para contar os registros.")
+def contar_registros(entry_tabela, listbox_tabelas, caixa_saida):
+    tabelas = obter_tabelas_selecionadas(entry_tabela, listbox_tabelas)
+    if not tabelas:
+        escrever_saida(caixa_saida, "[ERRO] Selecione ou informe ao menos uma tabela para contagem.")
         return
 
     def run():
+        con_fb = None
+        con_sql = None
         try:
             config = carregar_config()
             con_fb = conectar_firebird(config)
             cur_fb = con_fb.cursor()
-            cur_fb.execute(f"SELECT COUNT(*) FROM {tabela}")
-            total_fb = cur_fb.fetchone()[0]
-            con_fb.close()
-
             con_sql = conectar_mssql(config)
             cur_sql = con_sql.cursor()
-            cur_sql.execute(f"SELECT COUNT(*) FROM {tabela}")
-            total_sql = cur_sql.fetchone()[0]
-            con_sql.close()
 
-            escrever_saida(caixa_saida, f"📌 Total na origem (Firebird): {total_fb} registros")
-            escrever_saida(caixa_saida, f"📌 Total no destino (MSSQL): {total_sql} registros")
+            for tabela in tabelas:
+                cur_fb.execute(f"SELECT COUNT(*) FROM {tabela}")
+                total_fb = cur_fb.fetchone()[0]
+
+                cur_sql.execute(f"SELECT COUNT(*) FROM {tabela}")
+                total_sql = cur_sql.fetchone()[0]
+
+                escrever_saida(caixa_saida, f"📌 {tabela} - Total na origem (Firebird): {total_fb} registros")
+                escrever_saida(caixa_saida, f"📌 {tabela} - Total no destino (MSSQL): {total_sql} registros")
+
+            con_fb.close()
+            con_sql.close()
 
         except Exception as e:
             escrever_saida(caixa_saida, f"[ERRO] ao contar registros: {e}")
+        finally:
+            if con_fb:
+                try:
+                    con_fb.close()
+                except Exception:
+                    pass
+            if con_sql:
+                try:
+                    con_sql.close()
+                except Exception:
+                    pass
 
-    threading.Thread(target=run).start()
+    threading.Thread(target=run, daemon=True).start()
+
+
+def carregar_tabelas(listbox_tabelas, caixa_saida):
+    escrever_saida(caixa_saida, "🔄 Carregando tabelas disponíveis do Firebird...")
+
+    def run():
+        con = None
+        try:
+            config = carregar_config()
+            con = conectar_firebird(config)
+            tabelas = listar_tabelas_firebird(con)
+
+            def atualizar_lista():
+                listbox_tabelas.delete(0, tk.END)
+                for tabela in tabelas:
+                    listbox_tabelas.insert(tk.END, tabela)
+                escrever_saida(caixa_saida, f"📋 {len(tabelas)} tabelas disponíveis carregadas.")
+
+            listbox_tabelas.after(0, atualizar_lista)
+        except Exception as e:
+            listbox_tabelas.after(0, lambda: escrever_saida(caixa_saida, f"[ERRO] ao carregar tabelas: {e}"))
+        finally:
+            if con:
+                con.close()
+
+    threading.Thread(target=run, daemon=True).start()
 
 def abrir_edicao_config():
     config = carregar_config()
@@ -174,11 +230,24 @@ def criar_interface():
     entry_tabela = tk.Entry(root, font=("Arial", 12), width=50)
     entry_tabela.pack(pady=5)
 
+    tk.Label(root, text="Tabelas disponíveis (Ctrl/Shift para múltiplas):", font=("Arial", 12)).pack(pady=(10, 5))
+
+    frame_lista = tk.Frame(root)
+    frame_lista.pack(padx=10, fill="both", expand=False)
+
+    listbox_tabelas = tk.Listbox(frame_lista, selectmode=tk.MULTIPLE, font=("Courier", 10),
+                                 width=50, height=10, exportselection=False)
+    listbox_tabelas.pack(side=tk.LEFT, fill="both", expand=True)
+
+    scrollbar_lista = tk.Scrollbar(frame_lista, orient=tk.VERTICAL, command=listbox_tabelas.yview)
+    scrollbar_lista.pack(side=tk.RIGHT, fill=tk.Y)
+    listbox_tabelas.config(yscrollcommand=scrollbar_lista.set)
+
     frame_botoes = tk.Frame(root)
     frame_botoes.pack(pady=10)
 
     tk.Button(frame_botoes, text="Iniciar Migração", font=("Arial", 10),
-              command=lambda: executar_migracao(entry_tabela, caixa_saida)).grid(row=0, column=0, padx=5)
+              command=lambda: executar_migracao(entry_tabela, listbox_tabelas, caixa_saida)).grid(row=0, column=0, padx=5)
 
     tk.Button(frame_botoes, text="Editar Configuração", font=("Arial", 10),
               command=abrir_edicao_config).grid(row=0, column=1, padx=5)
@@ -190,7 +259,10 @@ def criar_interface():
               command=lambda: testar_conexao_mssql(caixa_saida)).grid(row=0, column=3, padx=5)
 
     tk.Button(frame_botoes, text="Contar Registros", font=("Arial", 10),
-              command=lambda: contar_registros(entry_tabela, caixa_saida)).grid(row=0, column=4, padx=5)
+              command=lambda: contar_registros(entry_tabela, listbox_tabelas, caixa_saida)).grid(row=0, column=4, padx=5)
+
+    tk.Button(frame_botoes, text="Carregar Tabelas", font=("Arial", 10),
+              command=lambda: carregar_tabelas(listbox_tabelas, caixa_saida)).grid(row=0, column=5, padx=5)
 
     tk.Label(root, text="Saída de Log:").pack()
 
@@ -200,6 +272,8 @@ def criar_interface():
     scrollbar = tk.Scrollbar(root, command=caixa_saida.yview)
     caixa_saida.config(yscrollcommand=scrollbar.set)
     scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+    root.after(200, lambda: carregar_tabelas(listbox_tabelas, caixa_saida))
 
     root.mainloop()
 
