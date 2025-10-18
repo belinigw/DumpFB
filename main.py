@@ -2,36 +2,164 @@ import tkinter as tk
 from tkinter import messagebox
 import json
 import threading
+from typing import List
+
 from dump import executar_dump
 from db_firebird import conectar_firebird, listar_tabelas_firebird
 from db_mssql import conectar_mssql
 
 CONFIG_PATH = "config.json"
 
+
 def carregar_config():
     with open(CONFIG_PATH, "r") as f:
         return json.load(f)
+
 
 def salvar_config(config):
     with open(CONFIG_PATH, "w") as f:
         json.dump(config, f, indent=2)
 
+
 def escrever_saida(caixa_saida, texto):
     caixa_saida.insert(tk.END, texto + "\n")
     caixa_saida.see(tk.END)
 
-def obter_tabelas_selecionadas(entry_tabela, listbox_tabelas):
-    selecionadas = [listbox_tabelas.get(i) for i in listbox_tabelas.curselection()]
-    manual = entry_tabela.get().strip()
-    if not selecionadas and manual:
-        selecionadas = [manual]
-    return selecionadas
+
+class TableSelector(tk.Frame):
+    def __init__(self, master, columns=3):
+        super().__init__(master)
+        self.columns = max(1, columns)
+        self.all_tables: List[str] = []
+        self.selected_tables = set()
+        self.check_vars = {}
+
+        self.search_var = tk.StringVar()
+        self.search_var.trace_add("write", self._on_search_change)
+
+        search_frame = tk.Frame(self)
+        search_frame.pack(fill="x", padx=10, pady=(0, 5))
+
+        tk.Label(search_frame, text="Pesquisar tabelas:", font=("Arial", 11)).pack(
+            side=tk.LEFT
+        )
+
+        self.search_entry = tk.Entry(
+            search_frame, textvariable=self.search_var, font=("Arial", 11)
+        )
+        self.search_entry.pack(side=tk.LEFT, fill="x", expand=True, padx=(5, 5))
+
+        tk.Button(search_frame, text="Limpar", command=self._clear_search).pack(
+            side=tk.LEFT
+        )
+
+        list_container = tk.Frame(self)
+        list_container.pack(fill="both", expand=True)
+
+        self.canvas = tk.Canvas(list_container, borderwidth=0)
+        self.canvas.pack(side=tk.LEFT, fill="both", expand=True)
+
+        self.scrollbar_vertical = tk.Scrollbar(
+            list_container, orient=tk.VERTICAL, command=self.canvas.yview
+        )
+        self.scrollbar_vertical.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self.canvas.configure(yscrollcommand=self.scrollbar_vertical.set)
+
+        self.inner_frame = tk.Frame(self.canvas)
+        self.canvas_window = self.canvas.create_window(
+            (0, 0), window=self.inner_frame, anchor="nw"
+        )
+
+        self.inner_frame.bind("<Configure>", self._update_scroll_region)
+
+        self.scrollbar_horizontal = tk.Scrollbar(
+            self, orient=tk.HORIZONTAL, command=self.canvas.xview
+        )
+        self.scrollbar_horizontal.pack(fill=tk.X, padx=10, pady=(0, 10))
+
+        self.canvas.configure(xscrollcommand=self.scrollbar_horizontal.set)
+
+    def focus_search(self):
+        self.search_entry.focus_set()
+
+    def set_tables(self, tables: List[str]):
+        self.all_tables = sorted(tables)
+        self.selected_tables.intersection_update(self.all_tables)
+        self._rebuild_checkbuttons()
+
+    def get_selected_tables(self) -> List[str]:
+        return [t for t in self.all_tables if t in self.selected_tables]
+
+    def _filtered_tables(self) -> List[str]:
+        termo = self.search_var.get().strip().lower()
+        if not termo:
+            return list(self.all_tables)
+        return [tabela for tabela in self.all_tables if termo in tabela.lower()]
+
+    def _rebuild_checkbuttons(self):
+        for widget in self.inner_frame.winfo_children():
+            widget.destroy()
+        self.check_vars.clear()
+
+        tabelas_filtradas = self._filtered_tables()
+
+        if not tabelas_filtradas:
+            tk.Label(
+                self.inner_frame, text="Nenhuma tabela encontrada.", font=("Arial", 11)
+            ).grid(row=0, column=0, padx=10, pady=10, sticky="w")
+            self._update_scroll_region()
+            return
+
+        for column in range(self.columns):
+            self.inner_frame.grid_columnconfigure(column, weight=1, pad=5)
+
+        for indice, tabela in enumerate(tabelas_filtradas):
+            variavel = tk.BooleanVar(value=tabela in self.selected_tables)
+            self.check_vars[tabela] = variavel
+            caixa_selecao = tk.Checkbutton(
+                self.inner_frame,
+                text=tabela,
+                variable=variavel,
+                onvalue=True,
+                offvalue=False,
+                anchor="w",
+                padx=10,
+                pady=2,
+                command=lambda nome=tabela, var=variavel: self._toggle_selection(
+                    nome, var.get()
+                ),
+            )
+            linha = indice // self.columns
+            coluna = indice % self.columns
+            caixa_selecao.grid(row=linha, column=coluna, sticky="w")
+
+        self._update_scroll_region()
+
+    def _toggle_selection(self, tabela, selecionada):
+        if selecionada:
+            self.selected_tables.add(tabela)
+        else:
+            self.selected_tables.discard(tabela)
+
+    def _clear_search(self):
+        self.search_var.set("")
+
+    def _on_search_change(self, *_):
+        self._rebuild_checkbuttons()
+
+    def _update_scroll_region(self, _event=None):
+        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
 
 
-def executar_migracao(entry_tabela, listbox_tabelas, caixa_saida):
-    tabelas = obter_tabelas_selecionadas(entry_tabela, listbox_tabelas)
+def obter_tabelas_selecionadas(table_selector: TableSelector):
+    return table_selector.get_selected_tables()
+
+
+def executar_migracao(table_selector, caixa_saida):
+    tabelas = obter_tabelas_selecionadas(table_selector)
     if not tabelas:
-        escrever_saida(caixa_saida, "[ERRO] Selecione ou informe ao menos uma tabela para migrar.")
+        escrever_saida(caixa_saida, "[ERRO] Selecione ao menos uma tabela para migrar.")
         return
 
     def run():
