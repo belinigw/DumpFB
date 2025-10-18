@@ -10,60 +10,6 @@ from db_mssql import conectar_mssql
 
 CONFIG_PATH = "config.json"
 
-BUTTON_COLORS = {
-    "primary": {
-        "background": "#1976D2",
-        "foreground": "#FFFFFF",
-        "activebackground": "#115293",
-        "activeforeground": "#FFFFFF",
-    },
-    "secondary": {
-        "background": "#455A64",
-        "foreground": "#FFFFFF",
-        "activebackground": "#1C313A",
-        "activeforeground": "#FFFFFF",
-    },
-    "success": {
-        "background": "#2E7D32",
-        "foreground": "#FFFFFF",
-        "activebackground": "#1B5E20",
-        "activeforeground": "#FFFFFF",
-    },
-    "warning": {
-        "background": "#F9A825",
-        "foreground": "#1A1A1A",
-        "activebackground": "#F57F17",
-        "activeforeground": "#1A1A1A",
-    },
-    "info": {
-        "background": "#0288D1",
-        "foreground": "#FFFFFF",
-        "activebackground": "#01579B",
-        "activeforeground": "#FFFFFF",
-    },
-}
-
-
-def criar_botao_colorido(
-    parent, texto, comando, *, estilo="primary", fonte=("Arial", 10)
-):
-    cores = BUTTON_COLORS.get(estilo, BUTTON_COLORS["primary"])
-    return tk.Button(
-        parent,
-        text=texto,
-        font=fonte,
-        command=comando,
-        bg=cores["background"],
-        fg=cores["foreground"],
-        activebackground=cores["activebackground"],
-        activeforeground=cores["activeforeground"],
-        relief=tk.RAISED,
-        bd=1,
-        cursor="hand2",
-        padx=10,
-        pady=5,
-    )
-
 
 def carregar_config():
     with open(CONFIG_PATH, "r") as f:
