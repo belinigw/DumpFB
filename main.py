@@ -26,19 +26,18 @@ def escrever_saida(caixa_saida, texto):
     caixa_saida.see(tk.END)
 
 
-class TableSelector:
+class TableSelector(tk.Frame):
     def __init__(self, master, columns=3):
+        super().__init__(master)
         self.columns = max(1, columns)
         self.all_tables: List[str] = []
         self.selected_tables = set()
         self.check_vars = {}
 
-        self.frame = tk.Frame(master)
-
         self.search_var = tk.StringVar()
         self.search_var.trace_add("write", self._on_search_change)
 
-        search_frame = tk.Frame(self.frame)
+        search_frame = tk.Frame(self)
         search_frame.pack(fill="x", padx=10, pady=(0, 5))
 
         tk.Label(search_frame, text="Pesquisar tabelas:", font=("Arial", 11)).pack(
@@ -54,7 +53,7 @@ class TableSelector:
             side=tk.LEFT
         )
 
-        list_container = tk.Frame(self.frame)
+        list_container = tk.Frame(self)
         list_container.pack(fill="both", expand=True)
 
         self.canvas = tk.Canvas(list_container, borderwidth=0)
@@ -75,14 +74,11 @@ class TableSelector:
         self.inner_frame.bind("<Configure>", self._update_scroll_region)
 
         self.scrollbar_horizontal = tk.Scrollbar(
-            self.frame, orient=tk.HORIZONTAL, command=self.canvas.xview
+            self, orient=tk.HORIZONTAL, command=self.canvas.xview
         )
         self.scrollbar_horizontal.pack(fill=tk.X, padx=10, pady=(0, 10))
 
         self.canvas.configure(xscrollcommand=self.scrollbar_horizontal.set)
-
-    def pack(self, **kwargs):
-        self.frame.pack(**kwargs)
 
     def focus_search(self):
         self.search_entry.focus_set()
@@ -284,9 +280,9 @@ def carregar_tabelas(table_selector, caixa_saida):
                     caixa_saida, f"📋 {len(tabelas)} tabelas disponíveis carregadas."
                 )
 
-            table_selector.frame.after(0, atualizar_lista)
+            table_selector.after(0, atualizar_lista)
         except Exception as e:
-            table_selector.frame.after(
+            table_selector.after(
                 0,
                 lambda: escrever_saida(caixa_saida, f"[ERRO] ao carregar tabelas: {e}"),
             )
