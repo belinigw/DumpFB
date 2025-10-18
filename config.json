@@ -1,0 +1,19 @@
+{
+  "firebird": {
+    "database": "D:\\CLIENTES-ManutDB\\4546-multcont\\AC_NOVO.FDB",
+    "host": "localhost",
+    "port": 3050,
+    "user": "SYSDBA",
+    "password": "masterkey"
+  },
+  "mssql": {
+    "server": "localhost\\MSSQLSRV14",
+    "database": "ModeloAC",
+    "user": "sa",
+    "password": "102030"
+  },
+  "settings": {
+    "chunk_size": 5000,
+    "log_path": "logs/dump.log"
+  }
+}

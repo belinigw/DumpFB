@@ -1,0 +1,6 @@
+fdb
+pymssql
+pandas
+tqdm
+logging
+json
