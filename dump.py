@@ -373,6 +373,7 @@ def executar_dump(
                 destino_handler.disable_constraints()
 
             if cancel_event and cancel_event.is_set():
+                cancelado = True
                 raise OperationCancelled(
                     "Processo cancelado antes da limpeza do destino."
                 )
@@ -389,6 +390,7 @@ def executar_dump(
                 buscar_lotes_firebird(con_origem, tabela, chunk_size, offset), start=1
             ):
                 if cancel_event and cancel_event.is_set():
+                    cancelado = True
                     raise OperationCancelled("Processo cancelado pelo usuário.")
                 try:
                     destino_handler.insert_batch(tabela, colunas, lote)
@@ -405,6 +407,9 @@ def executar_dump(
                     log_fn(mensagem)
                     logging.error(mensagem)
                     break
+        except OperationCancelled:
+            cancelado = True
+            raise
         finally:
             destino_handler.after_inserts(tabela)
 
