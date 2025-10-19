@@ -2,7 +2,7 @@ import logging
 import threading
 import time
 from dataclasses import dataclass
-from typing import Callable, Dict, Iterable, Optional, Sequence, Set, Tuple
+from typing import Callable, Dict, Iterable, Optional, Sequence, Set, Tuple, List
 
 from db_firebird import (
     buscar_lotes_firebird,
@@ -239,6 +239,31 @@ def configurar_logger(log_path: str) -> None:
         format="%(asctime)s | %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
+
+
+def sanitizar_lote(
+    lote: Sequence[Sequence[object]],
+    colunas: Sequence[str],
+    log_fn: LogFunction = print,
+) -> List[Tuple[object, ...]]:
+    registros_tratados: List[Tuple[object, ...]] = []
+    for registro in lote:
+        valores = list(registro)
+        for indice, coluna in enumerate(colunas):
+            if indice >= len(valores):
+                break
+            valor_atual = valores[indice]
+            if isinstance(valor_atual, bytes):
+                decodificado = None
+                try:
+                    decodificado = valor_atual.decode("utf-8")
+                except Exception:
+                    mensagem = f"Falha ao decodificar bytes na coluna '{coluna}'. Valor substituído por None."
+                    log_fn(mensagem)
+                    logging.warning(mensagem)
+                valores[indice] = decodificado
+        registros_tratados.append(tuple(valores))
+    return registros_tratados
 
 
 def _tentar_decodificar_bytes(
