@@ -140,6 +140,7 @@ class ApplicationController:
         )
 
         objetos_desativados = False
+        constraints_desativadas = False
         pendencias_finais: Sequence[Tuple[str, str]] = []
         try:
             if destino_handler.supports_global_disable:
@@ -152,6 +153,15 @@ class ApplicationController:
                 except Exception as erro:
                     log_fn(
                         f"[ERRO] Falha ao desativar objetos do destino de forma global: {erro}. Continuando com o fluxo padrão."
+                    )
+            if not objetos_desativados and destino_handler.supports_constraints:
+                log_fn("⛔ Desativando constraints de todas as tabelas do destino...")
+                try:
+                    destino_handler.disable_constraints()
+                    constraints_desativadas = True
+                except Exception as erro:
+                    log_fn(
+                        f"[ERRO] Falha ao desativar constraints do destino: {erro}. Prosseguindo mesmo assim."
                     )
 
             for tabela in tabelas:
@@ -166,26 +176,34 @@ class ApplicationController:
                     log_fn=log_fn,
                     sql_logger=self._notify_sql,
                     constraint_resolver=constraint_prompt,
-                    gerenciar_constraints=not objetos_desativados,
+                    gerenciar_constraints=False,
                 )
                 log_fn(
-                    f"✅ Migração da tabela '{tabela}' concluída: {resumo.total_inseridos} registros em {resumo.tempo_total:.2f} segundos."
+                    f"✅ Migração da tabela '{tabela}' concluída: {resumo.total_inseridos} "
+                    f"registros em {resumo.tempo_total:.2f} segundos."
                 )
                 self._registrar_comparacao(tabela, resumo, log_fn)
 
             log_fn("🚀 Processo finalizado para todas as tabelas selecionadas.")
         finally:
-            if objetos_desativados:
-                try:
+            try:
+                if objetos_desativados:
                     log_fn(
                         "🔁 Reativando constraints, índices e gatilhos de todas as tabelas do destino..."
                     )
                     destino_handler.enable_all_objects()
-                except Exception as erro:
-                    log_fn(f"[ERRO] Falha ao reativar objetos do destino: {erro}")
-                pendencias_finais = self._resolver_constraints_pendentes(
-                    destino_handler, log_fn, constraint_prompt
-                )
+                elif constraints_desativadas:
+                    log_fn(
+                        "🔁 Reativando constraints de todas as tabelas do destino..."
+                    )
+                    destino_handler.enable_constraints()
+            except Exception as erro:
+                log_fn(f"[ERRO] Falha ao reativar objetos do destino: {erro}")
+            finally:
+                if objetos_desativados or constraints_desativadas:
+                    pendencias_finais = self._resolver_constraints_pendentes(
+                        destino_handler, log_fn, constraint_prompt
+                    )
         if pendencias_finais and constraint_prompt is None:
             for tabela_nome, constraint_nome in pendencias_finais:
                 log_fn(
