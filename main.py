@@ -1,14 +1,9 @@
-import json
 import threading
 import tkinter as tk
-from tkinter import messagebox
-from typing import List
+from tkinter import messagebox, ttk
+from typing import Dict, List, Optional, Sequence
 
-from dump import executar_dump
-from db_firebird import conectar_firebird, listar_tabelas_firebird
-from db_mssql import conectar_mssql
-
-CONFIG_PATH = "config.json"
+from controller import ApplicationController
 
 BUTTON_COLORS = {
     "primary": {
@@ -65,28 +60,14 @@ def criar_botao_colorido(
     )
 
 
-def carregar_config():
-    with open(CONFIG_PATH, "r") as arquivo:
-        return json.load(arquivo)
-
-
-def salvar_config(configuracoes):
-    with open(CONFIG_PATH, "w") as arquivo:
-        json.dump(configuracoes, arquivo, indent=2)
-
-
-def escrever_saida(caixa_saida, texto):
-    caixa_saida.insert(tk.END, texto + "\n")
-    caixa_saida.see(tk.END)
-
-
 class TableSelector(tk.Frame):
-    def __init__(self, master, columns: int = 3):
+    def __init__(self, master, min_column_width: int = 200):
         super().__init__(master)
-        self.columns = max(1, columns)
+        self.min_column_width = min_column_width
+        self.columns = 1
         self.all_tables: List[str] = []
         self.selected_tables = set()
-        self.checkbutton_variables = {}
+        self.checkbutton_variables: Dict[str, tk.BooleanVar] = {}
 
         self.search_value = tk.StringVar()
         self.search_value.trace_add("write", self._on_search_change)
@@ -130,6 +111,7 @@ class TableSelector(tk.Frame):
         )
 
         self.inner_frame.bind("<Configure>", self._update_scroll_region)
+        self.bind("<Configure>", self._on_resize)
 
         self.scrollbar_horizontal = tk.Scrollbar(
             list_container, orient=tk.HORIZONTAL, command=self.canvas.xview
@@ -141,7 +123,7 @@ class TableSelector(tk.Frame):
     def focus_search(self):
         self.search_entry.focus_set()
 
-    def set_tables(self, tables: List[str]):
+    def set_tables(self, tables: Sequence[str]):
         self.all_tables = sorted(tables)
         self.selected_tables.intersection_update(self.all_tables)
         self._rebuild_checkbuttons()
@@ -206,298 +188,441 @@ class TableSelector(tk.Frame):
     def _on_search_change(self, *_):
         self._rebuild_checkbuttons()
 
+    def _on_resize(self, event):
+        largura = max(1, event.width)
+        novas_colunas = max(1, largura // self.min_column_width)
+        if novas_colunas != self.columns:
+            self.columns = novas_colunas
+            self._rebuild_checkbuttons()
+
     def _update_scroll_region(self, _event=None):
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
 
 
-def obter_tabelas_selecionadas(table_selector: TableSelector):
-    return table_selector.get_selected_tables()
+class ConstraintDialog(tk.Toplevel):
+    def __init__(self, master, tabela: str, constraint: str):
+        super().__init__(master)
+        self.title("Ajustar Constraint")
+        self.resizable(False, False)
+        self.transient(master)
+        self.grab_set()
 
-
-def executar_migracao(table_selector, caixa_saida):
-    tabelas = obter_tabelas_selecionadas(table_selector)
-    if not tabelas:
-        escrever_saida(caixa_saida, "[ERRO] Selecione ao menos uma tabela para migrar.")
-        return
-
-    def run():
-        try:
-            configuracoes = carregar_config()
-            for tabela in tabelas:
-                escrever_saida(
-                    caixa_saida, f"🔄 Iniciando migração da tabela '{tabela}'..."
-                )
-                total, tempo, _ = executar_dump(
-                    tabela,
-                    configuracoes,
-                    log_fn=lambda msg, tabela=tabela: escrever_saida(
-                        caixa_saida, f"[{tabela}] {msg}"
-                    ),
-                )
-                escrever_saida(
-                    caixa_saida,
-                    f"✅ Migração da tabela '{tabela}' concluída: {total} registros em {tempo:.2f} segundos.",
-                )
-            escrever_saida(
-                caixa_saida,
-                "🚀 Processo finalizado para todas as tabelas selecionadas.",
-            )
-        except Exception as erro:
-            escrever_saida(caixa_saida, f"[ERRO] {erro}")
-
-    threading.Thread(target=run, daemon=True).start()
-
-
-def testar_conexao_firebird(caixa_saida):
-    try:
-        configuracoes = carregar_config()
-        conexao_firebird = conectar_firebird(configuracoes)
-        conexao_firebird.close()
-        escrever_saida(caixa_saida, "✅ Conexão com Firebird bem-sucedida.")
-    except Exception as erro:
-        escrever_saida(caixa_saida, f"[ERRO] Firebird: {erro}")
-
-
-def testar_conexao_mssql(caixa_saida):
-    try:
-        configuracoes = carregar_config()
-        conexao_mssql = conectar_mssql(configuracoes)
-        conexao_mssql.close()
-        escrever_saida(caixa_saida, "✅ Conexão com MSSQL bem-sucedida.")
-    except Exception as erro:
-        escrever_saida(caixa_saida, f"[ERRO] MSSQL: {erro}")
-
-
-def contar_registros(table_selector, caixa_saida):
-    tabelas = obter_tabelas_selecionadas(table_selector)
-    if not tabelas:
-        escrever_saida(
-            caixa_saida, "[ERRO] Selecione ao menos uma tabela para contagem."
+        mensagem = (
+            f"A constraint '{constraint}' na tabela '{tabela}' não pôde ser reativada.\n"
+            "Informe um comando SQL para ajustar os dados ou clique em Ignorar."
         )
-        return
+        tk.Label(self, text=mensagem, wraplength=400, justify=tk.LEFT).pack(
+            padx=15, pady=(15, 10)
+        )
 
-    def run():
-        conexao_firebird = None
-        conexao_mssql = None
-        try:
-            configuracoes = carregar_config()
-            conexao_firebird = conectar_firebird(configuracoes)
-            cursor_firebird = conexao_firebird.cursor()
-            conexao_mssql = conectar_mssql(configuracoes)
-            cursor_mssql = conexao_mssql.cursor()
+        self.texto_sql = tk.Text(self, width=60, height=6)
+        self.texto_sql.pack(padx=15, pady=(0, 10))
 
-            for tabela in tabelas:
-                cursor_firebird.execute(f"SELECT COUNT(*) FROM {tabela}")
-                total_firebird = cursor_firebird.fetchone()[0]
+        botoes = tk.Frame(self)
+        botoes.pack(pady=(0, 15))
 
-                cursor_mssql.execute(f"SELECT COUNT(*) FROM {tabela}")
-                total_mssql = cursor_mssql.fetchone()[0]
+        criar_botao_colorido(
+            botoes, "Executar", self._confirmar, estilo="success", fonte=("Arial", 10)
+        ).pack(side=tk.LEFT, padx=5)
+        criar_botao_colorido(
+            botoes, "Ignorar", self._cancelar, estilo="secondary", fonte=("Arial", 10)
+        ).pack(side=tk.LEFT, padx=5)
 
-                escrever_saida(
-                    caixa_saida,
-                    f"📌 {tabela} - Total na origem (Firebird): {total_firebird} registros",
-                )
-                escrever_saida(
-                    caixa_saida,
-                    f"📌 {tabela} - Total no destino (MSSQL): {total_mssql} registros",
-                )
+        self.resultado: Optional[str] = None
+        self.texto_sql.focus_set()
+        self.protocol("WM_DELETE_WINDOW", self._cancelar)
 
-        except Exception as erro:
-            escrever_saida(caixa_saida, f"[ERRO] ao contar registros: {erro}")
-        finally:
-            if conexao_firebird:
-                try:
-                    conexao_firebird.close()
-                except Exception:
-                    pass
-            if conexao_mssql:
-                try:
-                    conexao_mssql.close()
-                except Exception:
-                    pass
+    def _confirmar(self):
+        comando = self.texto_sql.get("1.0", tk.END).strip()
+        self.resultado = comando if comando else None
+        self.destroy()
 
-    threading.Thread(target=run, daemon=True).start()
+    def _cancelar(self):
+        self.resultado = None
+        self.destroy()
 
 
-def carregar_tabelas(table_selector, caixa_saida):
-    escrever_saida(caixa_saida, "🔄 Carregando tabelas disponíveis do Firebird...")
+class ConnectionEditor(tk.LabelFrame):
+    FIREBIRD_FIELDS = (
+        ("database", "Caminho do Banco"),
+        ("host", "Host"),
+        ("port", "Porta"),
+        ("user", "Usuário"),
+        ("password", "Senha"),
+    )
+    MSSQL_FIELDS = (
+        ("server", "Servidor"),
+        ("database", "Banco"),
+        ("user", "Usuário"),
+        ("password", "Senha"),
+    )
 
-    def run():
-        conexao_firebird = None
-        try:
-            configuracoes = carregar_config()
-            conexao_firebird = conectar_firebird(configuracoes)
-            tabelas = listar_tabelas_firebird(conexao_firebird)
+    def __init__(self, master, titulo: str, dados_iniciais: Dict):
+        super().__init__(master, text=titulo)
+        self.tipo_var = tk.StringVar(value=dados_iniciais.get("type", "firebird"))
+        self.frames: Dict[str, tk.Frame] = {}
+        self.entries: Dict[str, Dict[str, tk.Entry]] = {}
 
-            def atualizar_lista():
-                table_selector.set_tables(tabelas)
-                escrever_saida(
-                    caixa_saida, f"📋 {len(tabelas)} tabelas disponíveis carregadas."
-                )
+        linha_tipo = tk.Frame(self)
+        linha_tipo.pack(fill="x", padx=10, pady=5)
+        tk.Label(linha_tipo, text="Tipo:").pack(side=tk.LEFT)
+        tipo_combo = ttk.Combobox(
+            linha_tipo,
+            textvariable=self.tipo_var,
+            values=["firebird", "mssql"],
+            state="readonly",
+            width=12,
+        )
+        tipo_combo.pack(side=tk.LEFT, padx=(5, 0))
+        tipo_combo.bind("<<ComboboxSelected>>", lambda *_: self._atualizar_tipo())
 
-            table_selector.after(0, atualizar_lista)
-        except Exception as erro:
-            table_selector.after(
-                0,
-                lambda: escrever_saida(
-                    caixa_saida, f"[ERRO] ao carregar tabelas: {erro}"
-                ),
-            )
-        finally:
-            if conexao_firebird:
-                try:
-                    conexao_firebird.close()
-                except Exception:
-                    pass
+        conteudo = tk.Frame(self)
+        conteudo.pack(fill="both", expand=True, padx=10, pady=(0, 10))
 
-    threading.Thread(target=run, daemon=True).start()
+        self._criar_frame_tipo(
+            conteudo,
+            "firebird",
+            self.FIREBIRD_FIELDS,
+            dados_iniciais.get("database", {}),
+        )
+        self._criar_frame_tipo(
+            conteudo, "mssql", self.MSSQL_FIELDS, dados_iniciais.get("database", {})
+        )
+        self._atualizar_tipo()
 
+    def _criar_frame_tipo(
+        self,
+        container: tk.Frame,
+        tipo: str,
+        campos: Sequence[tuple],
+        valores_iniciais: Dict,
+    ) -> None:
+        frame = tk.Frame(container)
+        self.frames[tipo] = frame
+        self.entries[tipo] = {}
+        for chave, rotulo in campos:
+            linha = tk.Frame(frame)
+            linha.pack(fill="x", pady=2)
+            tk.Label(linha, text=f"{rotulo}:").pack(side=tk.LEFT)
+            entrada = tk.Entry(linha, width=40)
+            entrada.pack(side=tk.LEFT, padx=(5, 0), fill="x", expand=True)
+            valor = valores_iniciais.get(chave)
+            if valor is not None:
+                entrada.insert(0, str(valor))
+            self.entries[tipo][chave] = entrada
 
-def abrir_edicao_config():
-    configuracoes = carregar_config()
+    def _atualizar_tipo(self):
+        tipo = self.tipo_var.get()
+        for chave, frame in self.frames.items():
+            frame.pack_forget()
+            if chave == tipo:
+                frame.pack(fill="both", expand=True)
 
-    def salvar_e_fechar():
-        try:
-            configuracoes["firebird"]["database"] = entrada_firebird_banco.get()
-            configuracoes["firebird"]["host"] = entrada_firebird_host.get()
-            configuracoes["firebird"]["port"] = int(entrada_firebird_porta.get())
-            configuracoes["firebird"]["user"] = entrada_firebird_usuario.get()
-            configuracoes["firebird"]["password"] = entrada_firebird_senha.get()
-
-            configuracoes["mssql"]["server"] = entrada_mssql_servidor.get()
-            configuracoes["mssql"]["database"] = entrada_mssql_banco.get()
-            configuracoes["mssql"]["user"] = entrada_mssql_usuario.get()
-            configuracoes["mssql"]["password"] = entrada_mssql_senha.get()
-
-            configuracoes["settings"]["chunk_size"] = int(entrada_tamanho_bloco.get())
-            salvar_config(configuracoes)
-            janela_configuracao.destroy()
-        except Exception as erro:
-            messagebox.showerror("Erro ao salvar", str(erro))
-
-    janela_configuracao = tk.Toplevel()
-    janela_configuracao.title("Editar Configuração")
-    janela_configuracao.geometry("520x550")
-
-    tk.Label(janela_configuracao, text="Firebird - Caminho do Banco:").pack()
-    entrada_firebird_banco = tk.Entry(janela_configuracao, width=60)
-    entrada_firebird_banco.insert(0, configuracoes["firebird"]["database"])
-    entrada_firebird_banco.pack()
-
-    tk.Label(janela_configuracao, text="Firebird - Host:").pack()
-    entrada_firebird_host = tk.Entry(janela_configuracao, width=60)
-    entrada_firebird_host.insert(0, configuracoes["firebird"]["host"])
-    entrada_firebird_host.pack()
-
-    tk.Label(janela_configuracao, text="Firebird - Porta:").pack()
-    entrada_firebird_porta = tk.Entry(janela_configuracao, width=60)
-    entrada_firebird_porta.insert(0, str(configuracoes["firebird"]["port"]))
-    entrada_firebird_porta.pack()
-
-    tk.Label(janela_configuracao, text="Firebird - Usuário:").pack()
-    entrada_firebird_usuario = tk.Entry(janela_configuracao, width=60)
-    entrada_firebird_usuario.insert(0, configuracoes["firebird"]["user"])
-    entrada_firebird_usuario.pack()
-
-    tk.Label(janela_configuracao, text="Firebird - Senha:").pack()
-    entrada_firebird_senha = tk.Entry(janela_configuracao, width=60)
-    entrada_firebird_senha.insert(0, configuracoes["firebird"]["password"])
-    entrada_firebird_senha.pack()
-
-    tk.Label(janela_configuracao, text="MSSQL - Servidor:").pack()
-    entrada_mssql_servidor = tk.Entry(janela_configuracao, width=60)
-    entrada_mssql_servidor.insert(0, configuracoes["mssql"]["server"])
-    entrada_mssql_servidor.pack()
-
-    tk.Label(janela_configuracao, text="MSSQL - Nome do Banco:").pack()
-    entrada_mssql_banco = tk.Entry(janela_configuracao, width=60)
-    entrada_mssql_banco.insert(0, configuracoes["mssql"]["database"])
-    entrada_mssql_banco.pack()
-
-    tk.Label(janela_configuracao, text="MSSQL - Usuário:").pack()
-    entrada_mssql_usuario = tk.Entry(janela_configuracao, width=60)
-    entrada_mssql_usuario.insert(0, configuracoes["mssql"]["user"])
-    entrada_mssql_usuario.pack()
-
-    tk.Label(janela_configuracao, text="MSSQL - Senha:").pack()
-    entrada_mssql_senha = tk.Entry(janela_configuracao, width=60)
-    entrada_mssql_senha.insert(0, configuracoes["mssql"]["password"])
-    entrada_mssql_senha.pack()
-
-    tk.Label(janela_configuracao, text="Tamanho do bloco (chunk_size):").pack()
-    entrada_tamanho_bloco = tk.Entry(janela_configuracao, width=20)
-    entrada_tamanho_bloco.insert(0, str(configuracoes["settings"]["chunk_size"]))
-    entrada_tamanho_bloco.pack()
-
-    criar_botao_colorido(
-        janela_configuracao, "Salvar Configuração", salvar_e_fechar, estilo="success"
-    ).pack(pady=10)
+    def obter_dados(self) -> Dict:
+        tipo = self.tipo_var.get()
+        dados = {}
+        for campo, entrada in self.entries[tipo].items():
+            valor = entrada.get().strip()
+            if campo == "port":
+                dados[campo] = int(valor)
+            else:
+                dados[campo] = valor
+        return {"type": tipo, "database": dados}
 
 
 def criar_interface():
+    controller = ApplicationController()
+
     root = tk.Tk()
-    root.title("Migração Firebird → MSSQL (pymssql)")
-    root.geometry("780x620")
+    root.title("Migração Firebird ↔ MSSQL")
+    root.geometry("900x700")
 
-    tabela_selector = TableSelector(root, columns=3)
-    tabela_selector.pack(fill="both", expand=False, padx=10, pady=(10, 5))
-    tabela_selector.focus_search()
+    table_selector = TableSelector(root)
+    table_selector.pack(fill="both", expand=False, padx=10, pady=(10, 5))
+    table_selector.focus_search()
 
-    frame_botoes = tk.Frame(root)
-    frame_botoes.pack(pady=10)
+    botoes_superiores = tk.Frame(root)
+    botoes_superiores.pack(pady=5)
+
+    botoes_operacoes: List[tk.Button] = []
+    estado_operacao = {"em_andamento": False}
+
+    def definir_botoes_habilitados(habilitado: bool):
+        for botao in botoes_operacoes:
+            botao.config(state=tk.NORMAL if habilitado else tk.DISABLED)
+
+    def escrever_saida(widget: tk.Text, texto: str):
+        widget.config(state=tk.NORMAL)
+        widget.insert(tk.END, texto + "\n")
+        widget.see(tk.END)
+        widget.config(state=tk.DISABLED)
+
+    def log_message(mensagem: str):
+        root.after(0, lambda: escrever_saida(log_texto, mensagem))
+
+    def registrar_sql(comando: str):
+        root.after(0, lambda: escrever_saida(caixa_sql, comando))
+
+    controller.register_sql_listener(registrar_sql)
+
+    def iniciar_operacao():
+        estado_operacao["em_andamento"] = True
+        definir_botoes_habilitados(False)
+
+    def finalizar_operacao():
+        estado_operacao["em_andamento"] = False
+        definir_botoes_habilitados(True)
+
+    def executar_em_thread(acao):
+        if estado_operacao["em_andamento"]:
+            return
+        iniciar_operacao()
+
+        def wrapper():
+            try:
+                acao()
+            except Exception as erro:
+                log_message(f"[ERRO] {erro}")
+            finally:
+                root.after(0, finalizar_operacao)
+
+        threading.Thread(target=wrapper, daemon=True).start()
+
+    def limpar_sql_ui():
+        caixa_sql.config(state=tk.NORMAL)
+        caixa_sql.delete("1.0", tk.END)
+        caixa_sql.config(state=tk.DISABLED)
+
+    def atualizar_tabelas_ui(tabelas: Sequence[str]):
+        table_selector.set_tables(tabelas)
+
+    def conectar():
+        def acao():
+            controller.clear_sql_history()
+            root.after(0, limpar_sql_ui)
+            tabelas = controller.connect(log_message)
+            root.after(0, lambda: atualizar_tabelas_ui(tabelas))
+
+        executar_em_thread(acao)
+
+    def atualizar_tabelas():
+        def acao():
+            tabelas = controller.refresh_tables()
+            root.after(0, lambda: atualizar_tabelas_ui(tabelas))
+            log_message(f"📋 {len(tabelas)} tabelas atualizadas da origem.")
+
+        executar_em_thread(acao)
+
+    def obter_tabelas_selecionadas() -> List[str]:
+        return table_selector.get_selected_tables()
+
+    def solicitar_ajuste_constraint(tabela: str, constraint: str) -> Optional[str]:
+        evento = threading.Event()
+        resposta: Dict[str, Optional[str]] = {"sql": None}
+
+        def abrir_dialogo():
+            dialogo = ConstraintDialog(root, tabela, constraint)
+            root.wait_window(dialogo)
+            resposta["sql"] = dialogo.resultado
+            evento.set()
+
+        root.after(0, abrir_dialogo)
+        evento.wait()
+        return resposta["sql"]
+
+    def iniciar_migracao():
+        tabelas = obter_tabelas_selecionadas()
+        if not tabelas:
+            messagebox.showwarning(
+                "Seleção obrigatória", "Selecione ao menos uma tabela para migrar."
+            )
+            return
+
+        def acao():
+            controller.run_migration(tabelas, log_message, solicitar_ajuste_constraint)
+
+        executar_em_thread(acao)
+
+    def contar_registros():
+        tabelas = obter_tabelas_selecionadas()
+        if not tabelas:
+            messagebox.showwarning(
+                "Seleção obrigatória",
+                "Selecione ao menos uma tabela para contagem de registros.",
+            )
+            return
+
+        def acao():
+            controller.count_records(tabelas, log_message)
+
+        executar_em_thread(acao)
+
+    def testar_conexao(destino: str):
+        def acao():
+            controller.test_connection(destino, log_message)
+
+        executar_em_thread(acao)
+
+    def copiar_sql():
+        conteudo = controller.get_sql_history()
+        root.clipboard_clear()
+        root.clipboard_append("\n".join(conteudo))
+        messagebox.showinfo(
+            "SQL copiado", "Comandos SQL copiados para a área de transferência."
+        )
+
+    def abrir_configuracoes():
+        config_atual = controller.get_config()
+
+        janela = tk.Toplevel(root)
+        janela.title("Editar Configuração")
+        janela.geometry("680x700")
+        janela.transient(root)
+
+        editores = {}
+        for chave, titulo in (
+            ("source", "Origem"),
+            ("destination", "Destino"),
+            ("model", "Banco Modelo"),
+        ):
+            editor = ConnectionEditor(janela, titulo, config_atual.get(chave, {}))
+            editor.pack(fill="x", padx=10, pady=10)
+            editores[chave] = editor
+
+        settings_frame = tk.LabelFrame(janela, text="Configurações Gerais")
+        settings_frame.pack(fill="x", padx=10, pady=10)
+
+        linha_chunk = tk.Frame(settings_frame)
+        linha_chunk.pack(fill="x", pady=5)
+        tk.Label(linha_chunk, text="Chunk Size:").pack(side=tk.LEFT)
+        chunk_entry = tk.Entry(linha_chunk, width=10)
+        chunk_entry.pack(side=tk.LEFT, padx=(5, 0))
+        chunk_entry.insert(0, str(config_atual["settings"].get("chunk_size", 5000)))
+
+        linha_log = tk.Frame(settings_frame)
+        linha_log.pack(fill="x", pady=5)
+        tk.Label(linha_log, text="Caminho do Log:").pack(side=tk.LEFT)
+        log_entry = tk.Entry(linha_log, width=40)
+        log_entry.pack(side=tk.LEFT, padx=(5, 0), fill="x", expand=True)
+        log_entry.insert(
+            0, str(config_atual["settings"].get("log_path", "logs/dump.log"))
+        )
+
+        tk.Label(settings_frame, text="Consulta de Informações:").pack()
+        info_text = tk.Text(settings_frame, width=60, height=4)
+        info_text.pack(fill="x", pady=(0, 5))
+        info_text.insert(tk.END, controller.get_info_query())
+
+        def salvar():
+            try:
+                novo_config = config_atual.copy()
+                for chave, editor in editores.items():
+                    novo_config[chave] = editor.obter_dados()
+                novo_config["settings"] = {
+                    "chunk_size": int(chunk_entry.get().strip()),
+                    "log_path": log_entry.get().strip(),
+                    "info_query": info_text.get("1.0", tk.END).strip(),
+                }
+                controller.save_config(novo_config)
+                messagebox.showinfo(
+                    "Configuração", "Configuração salva com sucesso. Refaça a conexão."
+                )
+                janela.destroy()
+            except Exception as erro:
+                messagebox.showerror("Erro ao salvar", str(erro))
+
+        criar_botao_colorido(janela, "Salvar", salvar, estilo="success").pack(pady=10)
+
+    botao_conectar = criar_botao_colorido(
+        botoes_superiores, "Conectar", conectar, estilo="primary"
+    )
+    botao_conectar.grid(row=0, column=0, padx=5, pady=5)
+    botoes_operacoes.append(botao_conectar)
+
+    botao_migrar = criar_botao_colorido(
+        botoes_superiores, "Iniciar Migração", iniciar_migracao, estilo="success"
+    )
+    botao_migrar.grid(row=0, column=1, padx=5, pady=5)
+    botoes_operacoes.append(botao_migrar)
+
+    botao_contar = criar_botao_colorido(
+        botoes_superiores, "Contar Registros", contar_registros, estilo="warning"
+    )
+    botao_contar.grid(row=0, column=2, padx=5, pady=5)
+    botoes_operacoes.append(botao_contar)
+
+    botao_atualizar = criar_botao_colorido(
+        botoes_superiores, "Atualizar Tabelas", atualizar_tabelas, estilo="info"
+    )
+    botao_atualizar.grid(row=0, column=3, padx=5, pady=5)
+    botoes_operacoes.append(botao_atualizar)
+
+    botoes_inferiores = tk.Frame(root)
+    botoes_inferiores.pack(pady=5)
 
     criar_botao_colorido(
-        frame_botoes,
-        "Iniciar Migração",
-        lambda: executar_migracao(tabela_selector, caixa_saida),
-        estilo="success",
+        botoes_inferiores,
+        "Testar Origem",
+        lambda: testar_conexao("source"),
+        estilo="info",
     ).grid(row=0, column=0, padx=5, pady=5)
 
     criar_botao_colorido(
-        frame_botoes,
-        "Editar Configuração",
-        abrir_edicao_config,
-        estilo="secondary",
+        botoes_inferiores,
+        "Testar Destino",
+        lambda: testar_conexao("destination"),
+        estilo="info",
     ).grid(row=0, column=1, padx=5, pady=5)
 
     criar_botao_colorido(
-        frame_botoes,
-        "Testar Firebird",
-        lambda: testar_conexao_firebird(caixa_saida),
+        botoes_inferiores,
+        "Testar Modelo",
+        lambda: testar_conexao("model"),
         estilo="info",
     ).grid(row=0, column=2, padx=5, pady=5)
 
     criar_botao_colorido(
-        frame_botoes,
-        "Testar MSSQL",
-        lambda: testar_conexao_mssql(caixa_saida),
-        estilo="info",
+        botoes_inferiores,
+        "Editar Configuração",
+        abrir_configuracoes,
+        estilo="secondary",
     ).grid(row=0, column=3, padx=5, pady=5)
 
-    criar_botao_colorido(
-        frame_botoes,
-        "Contar Registros",
-        lambda: contar_registros(tabela_selector, caixa_saida),
-        estilo="warning",
-    ).grid(row=0, column=4, padx=5, pady=5)
+    notebook = ttk.Notebook(root)
+    notebook.pack(fill="both", expand=True, padx=10, pady=10)
+
+    aba_log = tk.Frame(notebook)
+    aba_sql = tk.Frame(notebook)
+    notebook.add(aba_log, text="Logs")
+    notebook.add(aba_sql, text="SQL")
+
+    log_texto = tk.Text(aba_log, wrap="word", height=18, font=("Courier", 10))
+    log_texto.pack(side=tk.LEFT, fill="both", expand=True)
+    log_scroll = tk.Scrollbar(aba_log, command=log_texto.yview)
+    log_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+    log_texto.config(yscrollcommand=log_scroll.set, state=tk.DISABLED)
+
+    caixa_sql = tk.Text(aba_sql, wrap="word", height=18, font=("Courier", 10))
+    caixa_sql.pack(side=tk.LEFT, fill="both", expand=True)
+    sql_scroll = tk.Scrollbar(aba_sql, command=caixa_sql.yview)
+    sql_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+    caixa_sql.config(yscrollcommand=sql_scroll.set, state=tk.DISABLED)
+
+    barra_sql = tk.Frame(root)
+    barra_sql.pack(pady=(0, 10))
 
     criar_botao_colorido(
-        frame_botoes,
-        "Carregar Tabelas",
-        lambda: carregar_tabelas(tabela_selector, caixa_saida),
-        estilo="primary",
-    ).grid(row=0, column=5, padx=5, pady=5)
+        barra_sql, "Copiar SQL", copiar_sql, estilo="primary", fonte=("Arial", 10)
+    ).pack(side=tk.LEFT, padx=5)
+    criar_botao_colorido(
+        barra_sql,
+        "Limpar SQL",
+        lambda: (controller.clear_sql_history(), limpar_sql_ui()),
+        estilo="secondary",
+        fonte=("Arial", 10),
+    ).pack(side=tk.LEFT, padx=5)
 
-    tk.Label(root, text="Saída de Log:").pack()
-
-    caixa_saida = tk.Text(root, wrap="word", height=20, font=("Courier", 10))
-    caixa_saida.pack(fill="both", expand=True, padx=10, pady=5)
-
-    scrollbar = tk.Scrollbar(root, command=caixa_saida.yview)
-    caixa_saida.config(yscrollcommand=scrollbar.set)
-    scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-
-    root.after(200, lambda: carregar_tabelas(tabela_selector, caixa_saida))
+    definir_botoes_habilitados(True)
 
     root.mainloop()
 

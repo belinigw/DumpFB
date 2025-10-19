@@ -1,19 +1,35 @@
 {
-  "firebird": {
-    "database": "D:\\CLIENTES-ManutDB\\4546-multcont\\AC_NOVO.FDB",
-    "host": "localhost",
-    "port": 3050,
-    "user": "SYSDBA",
-    "password": "masterkey"
+  "source": {
+    "type": "firebird",
+    "database": {
+      "database": "D:\\CLIENTES-ManutDB\\4546-multcont\\AC_NOVO.FDB",
+      "host": "localhost",
+      "port": 3050,
+      "user": "SYSDBA",
+      "password": "masterkey"
+    }
   },
-  "mssql": {
-    "server": "localhost\\MSSQLSRV14",
-    "database": "ModeloAC",
-    "user": "sa",
-    "password": "102030"
+  "destination": {
+    "type": "mssql",
+    "database": {
+      "server": "localhost\\MSSQLSRV14",
+      "database": "ModeloAC",
+      "user": "sa",
+      "password": "102030"
+    }
+  },
+  "model": {
+    "type": "mssql",
+    "database": {
+      "server": "localhost\\MSSQLSRV14",
+      "database": "ModeloACModelo",
+      "user": "sa",
+      "password": "102030"
+    }
   },
   "settings": {
     "chunk_size": 5000,
-    "log_path": "logs/dump.log"
+    "log_path": "logs/dump.log",
+    "info_query": "SELECT * FROM info"
   }
 }
