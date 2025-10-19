@@ -241,6 +241,38 @@ def configurar_logger(log_path: str) -> None:
     )
 
 
+def sanitizar_lote(
+    lote: Iterable[Sequence[object]],
+    colunas: Sequence[str],
+    log_fn: LogFunction = print,
+) -> List[Tuple[object, ...]]:
+    lote_tratado: List[Tuple[object, ...]] = []
+    for linha_indice, linha in enumerate(lote, start=1):
+        nova_linha: List[object] = []
+        for coluna_indice, valor in enumerate(linha):
+            if isinstance(valor, bytes):
+                try:
+                    novo_valor = valor.decode("utf-8")
+                except Exception:
+                    coluna_nome = (
+                        colunas[coluna_indice]
+                        if coluna_indice < len(colunas)
+                        else f"coluna_{coluna_indice}"
+                    )
+                    mensagem = (
+                        f"[WARN] Lote linha {linha_indice} | Coluna '{coluna_nome}' | "
+                        "Falha ao decodificar bytes → substituído por None"
+                    )
+                    log_fn(mensagem)
+                    logging.warning(mensagem)
+                    novo_valor = None
+                nova_linha.append(novo_valor)
+            else:
+                nova_linha.append(valor)
+        lote_tratado.append(tuple(nova_linha))
+    return lote_tratado
+
+
 def _criar_handler_destino(
     tipo: str, connection, sql_logger: SQLLogger
 ) -> BaseDestinationHandler:
@@ -391,14 +423,15 @@ def executar_dump(
                 if cancel_event and cancel_event.is_set():
                     raise OperationCancelled("Processo cancelado pelo usuário.")
                 try:
-                    destino_handler.insert_batch(tabela, colunas, lote)
+                    lote_sanitizado = sanitizar_lote(lote, colunas, log_fn)
+                    destino_handler.insert_batch(tabela, colunas, lote_sanitizado)
                     offset += chunk_size
-                    total_inseridos += len(lote)
+                    total_inseridos += len(lote_sanitizado)
                     log_fn(
-                        f"✅ Lote {indice}/{total_lotes} exportado ({len(lote)} registros)"
+                        f"✅ Lote {indice}/{total_lotes} exportado ({len(lote_sanitizado)} registros)"
                     )
                     logging.info(
-                        f"Tabela: {tabela} | Lote {indice} | {len(lote)} registros transferidos"
+                        f"Tabela: {tabela} | Lote {indice} | {len(lote_sanitizado)} registros transferidos"
                     )
                 except Exception as erro_lote:
                     mensagem = f"[ERRO] no lote {indice}: {erro_lote}"
