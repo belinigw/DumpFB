@@ -227,7 +227,7 @@ def executar_migracao(table_selector, caixa_saida):
                 escrever_saida(
                     caixa_saida, f"🔄 Iniciando migração da tabela '{tabela}'..."
                 )
-                total, tempo = executar_dump(
+                total, tempo, _ = executar_dump(
                     tabela,
                     configuracoes,
                     log_fn=lambda msg, tabela=tabela: escrever_saida(
