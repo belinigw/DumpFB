@@ -1,7 +1,7 @@
 import copy
 import json
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Sequence
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 from db_firebird import (
     conectar_firebird,
@@ -15,7 +15,7 @@ from db_mssql import (
     listar_tabelas_mssql,
     obter_versao_mssql,
 )
-from dump import MigrationSummary, executar_dump
+from dump import MigrationSummary, criar_handler_destino, executar_dump
 
 ConfigDict = Dict[str, object]
 SQLListener = Callable[[str], None]
@@ -134,25 +134,128 @@ class ApplicationController:
 
         self._ensure_connections()
 
-        for tabela in tabelas:
-            log_fn(f"🔄 Iniciando migração da tabela '{tabela}'...")
-            resumo: MigrationSummary = executar_dump(
-                tabela,
-                self.config,
-                connections={
-                    "source": self.source_connection,
-                    "destination": self.destination_connection,
-                },
-                log_fn=log_fn,
-                sql_logger=self._notify_sql,
-                constraint_resolver=constraint_prompt,
-            )
-            log_fn(
-                f"✅ Migração da tabela '{tabela}' concluída: {resumo.total_inseridos} registros em {resumo.tempo_total:.2f} segundos."
-            )
-            self._registrar_comparacao(tabela, resumo, log_fn)
+        destino_cfg = self.config["destination"]
+        destino_handler = criar_handler_destino(
+            destino_cfg["type"], self.destination_connection, self._notify_sql
+        )
 
-        log_fn("🚀 Processo finalizado para todas as tabelas selecionadas.")
+        objetos_desativados = False
+        constraints_desativadas = False
+        pendencias_finais: Sequence[Tuple[str, str]] = []
+        try:
+            if destino_handler.supports_global_disable:
+                log_fn(
+                    "⛔ Desativando constraints, índices e gatilhos de todas as tabelas do destino..."
+                )
+                try:
+                    destino_handler.disable_all_objects()
+                    objetos_desativados = True
+                except Exception as erro:
+                    log_fn(
+                        f"[ERRO] Falha ao desativar objetos do destino de forma global: {erro}. Continuando com o fluxo padrão."
+                    )
+            if not objetos_desativados and destino_handler.supports_constraints:
+                log_fn("⛔ Desativando constraints de todas as tabelas do destino...")
+                try:
+                    destino_handler.disable_constraints()
+                    constraints_desativadas = True
+                except Exception as erro:
+                    log_fn(
+                        f"[ERRO] Falha ao desativar constraints do destino: {erro}. Prosseguindo mesmo assim."
+                    )
+
+            for tabela in tabelas:
+                log_fn(f"🔄 Iniciando migração da tabela '{tabela}'...")
+                resumo: MigrationSummary = executar_dump(
+                    tabela,
+                    self.config,
+                    connections={
+                        "source": self.source_connection,
+                        "destination": self.destination_connection,
+                    },
+                    log_fn=log_fn,
+                    sql_logger=self._notify_sql,
+                    constraint_resolver=constraint_prompt,
+                    gerenciar_constraints=False,
+                )
+                log_fn(
+                    f"✅ Migração da tabela '{tabela}' concluída: {resumo.total_inseridos} "
+                    f"registros em {resumo.tempo_total:.2f} segundos."
+                )
+                self._registrar_comparacao(tabela, resumo, log_fn)
+
+            log_fn("🚀 Processo finalizado para todas as tabelas selecionadas.")
+        finally:
+            try:
+                if objetos_desativados:
+                    log_fn(
+                        "🔁 Reativando constraints, índices e gatilhos de todas as tabelas do destino..."
+                    )
+                    destino_handler.enable_all_objects()
+                elif constraints_desativadas:
+                    log_fn(
+                        "🔁 Reativando constraints de todas as tabelas do destino..."
+                    )
+                    destino_handler.enable_constraints()
+            except Exception as erro:
+                log_fn(f"[ERRO] Falha ao reativar objetos do destino: {erro}")
+            finally:
+                if objetos_desativados or constraints_desativadas:
+                    pendencias_finais = self._resolver_constraints_pendentes(
+                        destino_handler, log_fn, constraint_prompt
+                    )
+        if pendencias_finais and constraint_prompt is None:
+            for tabela_nome, constraint_nome in pendencias_finais:
+                log_fn(
+                    f"[AVISO] Constraint {constraint_nome} permaneceu desativada após tentativas manuais na tabela {tabela_nome}."
+                )
+
+    def _resolver_constraints_pendentes(
+        self,
+        destino_handler,
+        log_fn: LogFunction,
+        constraint_prompt: ConstraintPrompt,
+    ) -> Sequence[Tuple[str, str]]:
+        pendentes = list(destino_handler.list_disabled_constraints())
+        if not pendentes:
+            return []
+
+        if constraint_prompt is None:
+            return pendentes
+
+        for tabela_nome, constraint_nome in pendentes:
+            resolvido = False
+            while True:
+                comando_manual = constraint_prompt(tabela_nome, constraint_nome)
+                if not comando_manual:
+                    break
+                try:
+                    destino_handler.execute_sql(comando_manual)
+                except Exception as erro_execucao:
+                    log_fn(f"[ERRO] ao executar comando manual: {erro_execucao}")
+                    continue
+                try:
+                    destino_handler.enable_specific_constraint(
+                        tabela_nome, constraint_nome
+                    )
+                except Exception as erro_constraint:
+                    log_fn(
+                        f"[ERRO] ao reativar constraint {constraint_nome}: {erro_constraint}"
+                    )
+                    continue
+                pendentes_atual = destino_handler.list_disabled_constraints()
+                if (tabela_nome, constraint_nome) not in pendentes_atual:
+                    log_fn(
+                        f"🔒 Constraint {constraint_nome} reativada após ajuste manual."
+                    )
+                    resolvido = True
+                    break
+            if not resolvido:
+                log_fn(
+                    f"[AVISO] Constraint {constraint_nome} permaneceu desativada após tentativas manuais na tabela {tabela_nome}."
+                )
+
+        return list(destino_handler.list_disabled_constraints())
 
     def _registrar_comparacao(
         self, tabela: str, resumo: MigrationSummary, log_fn: LogFunction

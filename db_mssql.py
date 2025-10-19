@@ -70,6 +70,70 @@ def ativar_constraints_tabelas(
     connection.commit()
 
 
+def listar_triggers_ativas(connection) -> Sequence[Tuple[str, str]]:
+    cursor = connection.cursor()
+    cursor.execute(
+        """
+        SELECT OBJECT_NAME(parent_id) AS table_name, name AS trigger_name
+        FROM sys.triggers
+        WHERE parent_id <> 0
+          AND is_ms_shipped = 0
+          AND is_disabled = 0
+        """
+    )
+    return cursor.fetchall()
+
+
+def listar_indices_ativos(connection) -> Sequence[Tuple[str, str]]:
+    cursor = connection.cursor()
+    cursor.execute(
+        """
+        SELECT t.name AS table_name, i.name AS index_name
+        FROM sys.indexes AS i
+        INNER JOIN sys.tables AS t ON t.object_id = i.object_id
+        WHERE i.name IS NOT NULL
+          AND i.is_hypothetical = 0
+          AND i.is_disabled = 0
+          AND i.is_primary_key = 0
+          AND i.is_unique_constraint = 0
+          AND i.type_desc <> 'HEAP'
+        """
+    )
+    return cursor.fetchall()
+
+
+def desativar_trigger(connection, tabela: str, trigger: str, sql_logger=None) -> None:
+    comando = f"DISABLE TRIGGER [{trigger}] ON [{tabela}]"
+    if sql_logger:
+        sql_logger(comando)
+    cursor = connection.cursor()
+    cursor.execute(comando)
+
+
+def ativar_trigger(connection, tabela: str, trigger: str, sql_logger=None) -> None:
+    comando = f"ENABLE TRIGGER [{trigger}] ON [{tabela}]"
+    if sql_logger:
+        sql_logger(comando)
+    cursor = connection.cursor()
+    cursor.execute(comando)
+
+
+def desativar_indice(connection, tabela: str, indice: str, sql_logger=None) -> None:
+    comando = f"ALTER INDEX [{indice}] ON [{tabela}] DISABLE"
+    if sql_logger:
+        sql_logger(comando)
+    cursor = connection.cursor()
+    cursor.execute(comando)
+
+
+def ativar_indice(connection, tabela: str, indice: str, sql_logger=None) -> None:
+    comando = f"ALTER INDEX [{indice}] ON [{tabela}] REBUILD"
+    if sql_logger:
+        sql_logger(comando)
+    cursor = connection.cursor()
+    cursor.execute(comando)
+
+
 def ativar_constraint(
     connection, tabela: str, constraint: str, sql_logger=None
 ) -> None:

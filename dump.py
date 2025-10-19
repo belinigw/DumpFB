@@ -1,7 +1,7 @@
 import logging
 import time
 from dataclasses import dataclass
-from typing import Callable, Dict, Iterable, Optional, Sequence, Set, Tuple
+from typing import Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from db_firebird import (
     buscar_lotes_firebird,
@@ -17,16 +17,22 @@ from db_firebird import (
 from db_mssql import (
     ativar_constraint,
     ativar_constraints_tabelas,
+    ativar_indice,
+    ativar_trigger,
     conectar_mssql,
     definir_identity_insert,
     desativar_constraints_tabelas,
+    desativar_indice,
+    desativar_trigger,
     inserir_lote_mssql,
     limpar_tabela_destino,
     listar_constraints_desativadas,
     listar_constraints_mssql,
+    listar_indices_ativos,
     listar_indices_mssql,
     listar_procedures_mssql,
     listar_tabelas_mssql,
+    listar_triggers_ativas,
     listar_triggers_mssql,
     possui_coluna_identidade,
 )
@@ -47,6 +53,7 @@ class MigrationSummary:
 class BaseDestinationHandler:
     supports_constraints = False
     supports_identity_insert = False
+    supports_global_disable = False
 
     def __init__(self, connection, sql_logger: SQLLogger = None):
         self.connection = connection
@@ -59,6 +66,12 @@ class BaseDestinationHandler:
         return None
 
     def enable_constraints(self) -> None:
+        return None
+
+    def disable_all_objects(self) -> None:
+        return None
+
+    def enable_all_objects(self) -> None:
         return None
 
     def list_disabled_constraints(self) -> Sequence[Tuple[str, str]]:
@@ -99,10 +112,14 @@ class BaseDestinationHandler:
 class MssqlDestinationHandler(BaseDestinationHandler):
     supports_constraints = True
     supports_identity_insert = True
+    supports_global_disable = True
 
     def __init__(self, connection, sql_logger: SQLLogger = None):
         super().__init__(connection, sql_logger)
         self._identity_ativado: Dict[str, bool] = {}
+        self._disabled_triggers: Dict[str, List[str]] = {}
+        self._disabled_indexes: Dict[str, List[str]] = {}
+        self._global_objects_disabled = False
 
     def list_tables(self) -> Sequence[str]:
         return listar_tabelas_mssql(self.connection)
@@ -114,6 +131,46 @@ class MssqlDestinationHandler(BaseDestinationHandler):
     def enable_constraints(self) -> None:
         tabelas = self.list_tables()
         ativar_constraints_tabelas(self.connection, tabelas, self.sql_logger)
+
+    def disable_all_objects(self) -> None:
+        if self._global_objects_disabled:
+            return
+
+        tabelas = self.list_tables()
+        desativar_constraints_tabelas(self.connection, tabelas, self.sql_logger)
+
+        self._disabled_triggers = {}
+        for tabela, trigger in listar_triggers_ativas(self.connection):
+            desativar_trigger(self.connection, tabela, trigger, self.sql_logger)
+            self._disabled_triggers.setdefault(tabela, []).append(trigger)
+
+        self._disabled_indexes = {}
+        for tabela, indice in listar_indices_ativos(self.connection):
+            desativar_indice(self.connection, tabela, indice, self.sql_logger)
+            self._disabled_indexes.setdefault(tabela, []).append(indice)
+
+        self.connection.commit()
+        self._global_objects_disabled = True
+
+    def enable_all_objects(self) -> None:
+        if not self._global_objects_disabled:
+            return
+
+        tabelas = self.list_tables()
+        ativar_constraints_tabelas(self.connection, tabelas, self.sql_logger)
+
+        for tabela, indices in self._disabled_indexes.items():
+            for indice in indices:
+                ativar_indice(self.connection, tabela, indice, self.sql_logger)
+
+        for tabela, triggers in self._disabled_triggers.items():
+            for trigger in triggers:
+                ativar_trigger(self.connection, tabela, trigger, self.sql_logger)
+
+        self.connection.commit()
+        self._disabled_indexes.clear()
+        self._disabled_triggers.clear()
+        self._global_objects_disabled = False
 
     def list_disabled_constraints(self) -> Sequence[Tuple[str, str]]:
         return listar_constraints_desativadas(self.connection)
@@ -200,6 +257,12 @@ def _obter_metadata_por_tipo(tipo: str, connection) -> Dict[str, Set[str]]:
     return handler.metadata()
 
 
+def criar_handler_destino(
+    tipo: str, connection, sql_logger: SQLLogger = None
+) -> BaseDestinationHandler:
+    return _criar_handler_destino(tipo, connection, sql_logger)
+
+
 def _comparar_modelo(
     config: Dict,
     destino_handler: BaseDestinationHandler,
@@ -239,6 +302,7 @@ def executar_dump(
     log_fn: LogFunction = print,
     sql_logger: SQLLogger = None,
     constraint_resolver: ConstraintResolver = None,
+    gerenciar_constraints: bool = True,
 ) -> MigrationSummary:
     chunk_size = config["settings"]["chunk_size"]
     log_path = config["settings"]["log_path"]
@@ -291,9 +355,10 @@ def executar_dump(
     total_inseridos = 0
 
     resumo: Optional[MigrationSummary] = None
+    constraints_pendentes: Sequence[Tuple[str, str]] = []
     try:
         try:
-            if destino_handler.supports_constraints:
+            if gerenciar_constraints and destino_handler.supports_constraints:
                 log_fn("⛔ Desativando constraints de todas as tabelas do destino...")
                 destino_handler.disable_constraints()
 
@@ -324,55 +389,12 @@ def executar_dump(
             destino_handler.after_inserts(tabela)
 
             constraints_pendentes: Sequence[Tuple[str, str]] = []
-            if destino_handler.supports_constraints:
+            if gerenciar_constraints and destino_handler.supports_constraints:
                 try:
                     log_fn(
                         "🔁 Reativando constraints de todas as tabelas do destino..."
                     )
                     destino_handler.enable_constraints()
-                    constraints_pendentes = destino_handler.list_disabled_constraints()
-
-                    if constraints_pendentes and constraint_resolver:
-                        for tabela_nome, constraint_nome in constraints_pendentes:
-                            resolvido = False
-                            while True:
-                                comando_manual = constraint_resolver(
-                                    tabela_nome, constraint_nome
-                                )
-                                if not comando_manual:
-                                    break
-                                try:
-                                    destino_handler.execute_sql(comando_manual)
-                                except Exception as erro_execucao:
-                                    log_fn(
-                                        f"[ERRO] ao executar comando manual: {erro_execucao}"
-                                    )
-                                    continue
-                                try:
-                                    destino_handler.enable_specific_constraint(
-                                        tabela_nome, constraint_nome
-                                    )
-                                except Exception as erro_constraint:
-                                    log_fn(
-                                        f"[ERRO] ao reativar constraint {constraint_nome}: {erro_constraint}"
-                                    )
-                                    continue
-                                pendentes_atual = (
-                                    destino_handler.list_disabled_constraints()
-                                )
-                                if (
-                                    tabela_nome,
-                                    constraint_nome,
-                                ) not in pendentes_atual:
-                                    log_fn(
-                                        f"🔒 Constraint {constraint_nome} reativada após ajuste manual."
-                                    )
-                                    resolvido = True
-                                    break
-                            if not resolvido:
-                                log_fn(
-                                    f"[AVISO] Constraint {constraint_nome} permaneceu desativada após tentativas manuais."
-                                )
                     constraints_pendentes = destino_handler.list_disabled_constraints()
                 except Exception as erro_constraints:
                     mensagem_erro = (
