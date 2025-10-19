@@ -2,6 +2,7 @@ import concurrent.futures
 import copy
 import json
 import threading
+import time
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
@@ -168,6 +169,8 @@ class ApplicationController:
         )
         html_logger.set_source_size(obter_tamanho_banco_firebird(origem_caminho))
 
+        migration_started_at = time.time()
+
         pendencias_finais: Sequence[Tuple[str, str]] = []
         destino_handler = None
         objetos_desativados = False
@@ -304,6 +307,7 @@ class ApplicationController:
                         f"[AVISO] Constraint {constraint_nome} permaneceu desativada após tentativas manuais na tabela {tabela_nome}."
                     )
         finally:
+            html_logger.set_total_migration_time(time.time() - migration_started_at)
             destino_tamanho = obter_tamanho_banco_destino(
                 destino_cfg["type"], self.destination_connection
             )

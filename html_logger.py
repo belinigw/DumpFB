@@ -35,6 +35,27 @@ def _formatar_tamanho(tamanho_bytes: Optional[int]) -> str:
     return f"{tamanho:.2f} {unidades[indice]}"
 
 
+def _formatar_duracao(segundos: Optional[float]) -> str:
+    if segundos is None:
+        return "Indisponível"
+
+    try:
+        if segundos < 0:
+            return "Indisponível"
+    except TypeError:
+        return "Indisponível"
+
+    horas = int(segundos // 3600)
+    minutos = int((segundos % 3600) // 60)
+    segundos_restantes = segundos - (horas * 3600) - (minutos * 60)
+
+    if horas:
+        return f"{horas}h {minutos}m {segundos_restantes:.2f}s"
+    if minutos:
+        return f"{minutos}m {segundos_restantes:.2f}s"
+    return f"{segundos_restantes:.2f}s"
+
+
 def _inferir_nivel(mensagem: str) -> str:
     minusculo = mensagem.lower()
     if "[erro]" in minusculo or "⛔" in mensagem or "❌" in mensagem:
@@ -69,12 +90,19 @@ def obter_tamanho_banco_destino(tipo: str, connection) -> Optional[int]:
         return None
     tipo_normalizado = tipo.lower()
     if tipo_normalizado == "mssql":
+        cursor = None
         try:
             cursor = connection.cursor()
             cursor.execute("SELECT SUM(size) * 8 * 1024 FROM sys.database_files")
             resultado = cursor.fetchone()
         except Exception:
             return None
+        finally:
+            if cursor is not None:
+                try:
+                    cursor.close()
+                except Exception:
+                    pass
         if not resultado:
             return None
         valor = resultado[0]
@@ -112,6 +140,7 @@ class HtmlLogWriter:
         self._entries: List[_LogEntry] = []
         self._source_size: Optional[int] = None
         self._destination_size: Optional[int] = None
+        self._total_migration_seconds: Optional[float] = None
         self._comparison: Dict[str, Dict[str, Set[str]]] = {}
 
     @classmethod
@@ -146,6 +175,9 @@ class HtmlLogWriter:
 
     def set_destination_size(self, tamanho_bytes: Optional[int]) -> None:
         self._destination_size = tamanho_bytes
+
+    def set_total_migration_time(self, duracao_segundos: Optional[float]) -> None:
+        self._total_migration_seconds = duracao_segundos
 
     def merge_comparison(
         self, comparacao: Optional[Dict[str, Dict[str, Sequence[str]]]]
@@ -233,16 +265,20 @@ section h2 {{ color: #1E88E5; }}
 </header>
 <section>
   <h2>Resumo</h2>
-  <div class=\"summary\">
-    <div class=\"card\">
-      <h3>Tamanho do banco FDB original</h3>
-      <p>{_formatar_tamanho(self._source_size)}</p>
+    <div class=\"summary\">
+      <div class=\"card\">
+        <h3>Tamanho do banco FDB original</h3>
+        <p>{_formatar_tamanho(self._source_size)}</p>
+      </div>
+      <div class=\"card\">
+        <h3>Tamanho do banco SQL final</h3>
+        <p>{_formatar_tamanho(self._destination_size)}</p>
+      </div>
+      <div class=\"card\">
+        <h3>Tempo total da migração</h3>
+        <p>{_formatar_duracao(self._total_migration_seconds)}</p>
+      </div>
     </div>
-    <div class=\"card\">
-      <h3>Tamanho do banco SQL final</h3>
-      <p>{_formatar_tamanho(self._destination_size)}</p>
-    </div>
-  </div>
 </section>
 <section>
   <h2>Logs da Migração</h2>
