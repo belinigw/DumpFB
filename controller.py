@@ -2,6 +2,7 @@ import concurrent.futures
 import copy
 import json
 import threading
+import time
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
@@ -22,6 +23,11 @@ from dump import (
     OperationCancelled,
     criar_handler_destino,
     executar_dump,
+)
+from html_logger import (
+    HtmlLogWriter,
+    obter_tamanho_banco_destino,
+    obter_tamanho_banco_firebird,
 )
 
 ConfigDict = Dict[str, object]
@@ -151,129 +157,163 @@ class ApplicationController:
 
         self._ensure_connections()
 
-        if self._cancel_event.is_set():
-            log_fn("⚠️ Operação já marcada como cancelada. Reinicie antes de migrar.")
-            return
-
+        origem_cfg = self.config["source"]
         destino_cfg = self.config["destination"]
-        destino_handler = criar_handler_destino(
-            destino_cfg["type"], self.destination_connection, self._notify_sql
-        )
 
+        html_logger = HtmlLogWriter.from_config(self.config)
+        log_fn = html_logger.wrap(log_fn)
+
+        origem_db_cfg = origem_cfg.get("database", {})
+        origem_caminho = (
+            origem_db_cfg.get("database") if isinstance(origem_db_cfg, dict) else None
+        )
+        html_logger.set_source_size(obter_tamanho_banco_firebird(origem_caminho))
+
+        migration_started_at = time.time()
+
+        pendencias_finais: Sequence[Tuple[str, str]] = []
+        destino_handler = None
         objetos_desativados = False
         constraints_desativadas = False
-        pendencias_finais: Sequence[Tuple[str, str]] = []
+
         try:
-            if destino_handler.supports_global_disable:
+            if self._cancel_event.is_set():
                 log_fn(
-                    "⛔ Desativando constraints, índices e gatilhos de todas as tabelas do destino..."
+                    "⚠️ Operação já marcada como cancelada. Reinicie antes de migrar."
                 )
-                try:
-                    destino_handler.disable_all_objects()
-                    objetos_desativados = True
-                except Exception as erro:
-                    log_fn(
-                        f"[ERRO] Falha ao desativar objetos do destino de forma global: {erro}. Continuando com o fluxo padrão."
-                    )
-            if not objetos_desativados and destino_handler.supports_constraints:
-                log_fn("⛔ Desativando constraints de todas as tabelas do destino...")
-                try:
-                    destino_handler.disable_constraints()
-                    constraints_desativadas = True
-                except Exception as erro:
-                    log_fn(
-                        f"[ERRO] Falha ao desativar constraints do destino: {erro}. Prosseguindo mesmo assim."
-                    )
+                return
 
-            log_fn("🧹 Limpando tabelas selecionadas no destino antes da migração...")
-            self._limpar_tabelas(destino_handler, tabelas, log_fn)
+            destino_handler = criar_handler_destino(
+                destino_cfg["type"], self.destination_connection, self._notify_sql
+            )
 
-            if self._cancel_event.is_set():
-                raise OperationCancelled("Migração cancelada antes do início.")
-
-            worker_count = int(self.config["settings"].get("worker_count", 1))
-            if worker_count < 1:
-                worker_count = 1
-
-            erros: List[Tuple[str, Exception]] = []
-
-            with concurrent.futures.ThreadPoolExecutor(
-                max_workers=worker_count
-            ) as executor:
-                futuros = {}
-                for tabela in tabelas:
-                    if self._cancel_event.is_set():
-                        break
-                    log_fn(f"🔄 Iniciando migração da tabela '{tabela}'...")
-                    futuros[
-                        executor.submit(
-                            executar_dump,
-                            tabela,
-                            self.config,
-                            None,
-                            log_fn,
-                            self._notify_sql,
-                            constraint_prompt,
-                            False,
-                            self._cancel_event,
-                            False,
-                        )
-                    ] = tabela
-
-                for futuro in concurrent.futures.as_completed(futuros):
-                    tabela_atual = futuros[futuro]
-                    if self._cancel_event.is_set():
-                        break
-                    try:
-                        resumo = futuro.result()
-                    except OperationCancelled:
-                        log_fn(
-                            f"⚠️ Migração da tabela '{tabela_atual}' interrompida por cancelamento."
-                        )
-                        self._cancel_event.set()
-                        break
-                    except Exception as erro:
-                        erros.append((tabela_atual, erro))
-                        log_fn(
-                            f"[ERRO] Falha ao migrar a tabela '{tabela_atual}': {erro}"
-                        )
-                    else:
-                        log_fn(
-                            f"✅ Migração da tabela '{tabela_atual}' concluída: {resumo.total_inseridos} "
-                            f"registros em {resumo.tempo_total:.2f} segundos."
-                        )
-                        self._registrar_comparacao(tabela_atual, resumo, log_fn)
-
-            if self._cancel_event.is_set():
-                log_fn("⏹️ Migração cancelada pelo usuário.")
-            elif erros:
-                log_fn("⚠️ Processo finalizado com erros. Consulte os logs acima.")
-            else:
-                log_fn("🚀 Processo finalizado para todas as tabelas selecionadas.")
-        finally:
             try:
-                if objetos_desativados:
+                if destino_handler.supports_global_disable:
                     log_fn(
-                        "🔁 Reativando constraints, índices e gatilhos de todas as tabelas do destino..."
+                        "⛔ Desativando constraints, índices e gatilhos de todas as tabelas do destino..."
                     )
-                    destino_handler.enable_all_objects()
-                elif constraints_desativadas:
+                    try:
+                        destino_handler.disable_all_objects()
+                        objetos_desativados = True
+                    except Exception as erro:
+                        log_fn(
+                            f"[ERRO] Falha ao desativar objetos do destino de forma global: {erro}. Continuando com o fluxo padrão."
+                        )
+                if not objetos_desativados and destino_handler.supports_constraints:
                     log_fn(
-                        "🔁 Reativando constraints de todas as tabelas do destino..."
+                        "⛔ Desativando constraints de todas as tabelas do destino..."
                     )
-                    destino_handler.enable_constraints()
-            except Exception as erro:
-                log_fn(f"[ERRO] Falha ao reativar objetos do destino: {erro}")
-            finally:
-                if objetos_desativados or constraints_desativadas:
-                    pendencias_finais = self._resolver_constraints_pendentes(
-                        destino_handler, log_fn, constraint_prompt
-                    )
-        if pendencias_finais and constraint_prompt is None:
-            for tabela_nome, constraint_nome in pendencias_finais:
+                    try:
+                        destino_handler.disable_constraints()
+                        constraints_desativadas = True
+                    except Exception as erro:
+                        log_fn(
+                            f"[ERRO] Falha ao desativar constraints do destino: {erro}. Prosseguindo mesmo assim."
+                        )
+
                 log_fn(
-                    f"[AVISO] Constraint {constraint_nome} permaneceu desativada após tentativas manuais na tabela {tabela_nome}."
+                    "🧹 Limpando tabelas selecionadas no destino antes da migração..."
                 )
+                self._limpar_tabelas(destino_handler, tabelas, log_fn)
+
+                if self._cancel_event.is_set():
+                    raise OperationCancelled("Migração cancelada antes do início.")
+
+                worker_count = int(self.config["settings"].get("worker_count", 1))
+                if worker_count < 1:
+                    worker_count = 1
+
+                erros: List[Tuple[str, Exception]] = []
+
+                with concurrent.futures.ThreadPoolExecutor(
+                    max_workers=worker_count
+                ) as executor:
+                    futuros = {}
+                    for tabela in tabelas:
+                        if self._cancel_event.is_set():
+                            break
+                        log_fn(f"🔄 Iniciando migração da tabela '{tabela}'...")
+                        futuros[
+                            executor.submit(
+                                executar_dump,
+                                tabela,
+                                self.config,
+                                None,
+                                log_fn,
+                                self._notify_sql,
+                                constraint_prompt,
+                                False,
+                                self._cancel_event,
+                                False,
+                            )
+                        ] = tabela
+
+                    for futuro in concurrent.futures.as_completed(futuros):
+                        tabela_atual = futuros[futuro]
+                        if self._cancel_event.is_set():
+                            break
+                        try:
+                            resumo = futuro.result()
+                        except OperationCancelled:
+                            log_fn(
+                                f"⚠️ Migração da tabela '{tabela_atual}' interrompida por cancelamento."
+                            )
+                            self._cancel_event.set()
+                            break
+                        except Exception as erro:
+                            erros.append((tabela_atual, erro))
+                            log_fn(
+                                f"[ERRO] Falha ao migrar a tabela '{tabela_atual}': {erro}"
+                            )
+                        else:
+                            log_fn(
+                                f"✅ Migração da tabela '{tabela_atual}' concluída: {resumo.total_inseridos} "
+                                f"registros em {resumo.tempo_total:.2f} segundos."
+                            )
+                            self._registrar_comparacao(tabela_atual, resumo, log_fn)
+                            html_logger.merge_comparison(resumo.comparacao_modelo)
+
+                if self._cancel_event.is_set():
+                    log_fn("⏹️ Migração cancelada pelo usuário.")
+                elif erros:
+                    log_fn("⚠️ Processo finalizado com erros. Consulte os logs acima.")
+                else:
+                    log_fn("🚀 Processo finalizado para todas as tabelas selecionadas.")
+            finally:
+                try:
+                    if destino_handler and objetos_desativados:
+                        log_fn(
+                            "🔁 Reativando constraints, índices e gatilhos de todas as tabelas do destino..."
+                        )
+                        destino_handler.enable_all_objects()
+                    elif destino_handler and constraints_desativadas:
+                        log_fn(
+                            "🔁 Reativando constraints de todas as tabelas do destino..."
+                        )
+                        destino_handler.enable_constraints()
+                except Exception as erro:
+                    log_fn(f"[ERRO] Falha ao reativar objetos do destino: {erro}")
+                finally:
+                    if destino_handler and (
+                        objetos_desativados or constraints_desativadas
+                    ):
+                        pendencias_finais = self._resolver_constraints_pendentes(
+                            destino_handler, log_fn, constraint_prompt
+                        )
+
+            if pendencias_finais and constraint_prompt is None:
+                for tabela_nome, constraint_nome in pendencias_finais:
+                    log_fn(
+                        f"[AVISO] Constraint {constraint_nome} permaneceu desativada após tentativas manuais na tabela {tabela_nome}."
+                    )
+        finally:
+            html_logger.set_total_migration_time(time.time() - migration_started_at)
+            destino_tamanho = obter_tamanho_banco_destino(
+                destino_cfg["type"], self.destination_connection
+            )
+            html_logger.set_destination_size(destino_tamanho)
+            log_fn(f"📄 Relatório salvo em: {html_logger.file_path}")
+            html_logger.finalize()
 
     def _limpar_tabelas(
         self, destino_handler, tabelas: Sequence[str], log_fn: LogFunction
