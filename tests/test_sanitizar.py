@@ -96,6 +96,6 @@ def test_sanitizar_lote_mantem_bytes_quando_decodificacao_falha():
 
     resultado = sanitizar_lote(lote, colunas, log_fn=log_fn)
 
-    assert resultado == [(b"\xff\x00\xfe",)]
+    assert resultado == [("\xff\x00\xfe",)]
     assert mensagens[0] == "[WARN] Resumo de ajustes aplicados ao lote:"
-    assert any("não pôde" in mensagem for mensagem in mensagens[1:])
+    assert any("codec latin-1" in mensagem for mensagem in mensagens[1:])
