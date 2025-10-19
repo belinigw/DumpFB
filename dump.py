@@ -1,6 +1,7 @@
 import logging
 import threading
 import time
+from collections import defaultdict
 from dataclasses import dataclass
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
@@ -112,6 +113,14 @@ class BaseDestinationHandler:
             pass
         self.connection.commit()
 
+    def primary_key_columns(self, tabela: str) -> Sequence[str]:
+        return []
+
+    def suggest_new_primary_key_value(
+        self, tabela: str, coluna: str
+    ) -> Optional[object]:
+        return None
+
     def metadata(self) -> Dict[str, Set[str]]:
         raise NotImplementedError
 
@@ -202,6 +211,62 @@ class MssqlDestinationHandler(BaseDestinationHandler):
     ) -> None:
         inserir_lote_mssql(self.connection, tabela, colunas, dados, self.sql_logger)
 
+    def primary_key_columns(self, tabela: str) -> Sequence[str]:
+        cursor = self.connection.cursor()
+        try:
+            cursor.execute(
+                """
+                SELECT KU.COLUMN_NAME
+                FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS AS TC
+                INNER JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE AS KU
+                    ON TC.CONSTRAINT_NAME = KU.CONSTRAINT_NAME
+                    AND TC.TABLE_NAME = KU.TABLE_NAME
+                WHERE TC.CONSTRAINT_TYPE = 'PRIMARY KEY'
+                  AND TC.TABLE_NAME = %s
+                ORDER BY KU.ORDINAL_POSITION
+                """,
+                (tabela,),
+            )
+            return [linha[0] for linha in cursor.fetchall() if linha and linha[0]]
+        except Exception:
+            logging.debug(
+                "Falha ao consultar colunas de chave primária para a tabela %s",
+                tabela,
+                exc_info=True,
+            )
+            return []
+
+    def suggest_new_primary_key_value(
+        self, tabela: str, coluna: str
+    ) -> Optional[object]:
+        cursor = self.connection.cursor()
+        try:
+            cursor.execute(f"SELECT MAX([{coluna}]) FROM {tabela}")
+            resultado = cursor.fetchone()
+        except Exception:
+            logging.debug(
+                "Falha ao sugerir novo valor para a chave primária %s.%s",
+                tabela,
+                coluna,
+                exc_info=True,
+            )
+            return None
+
+        if not resultado:
+            return None
+
+        valor_atual = resultado[0]
+        if valor_atual is None:
+            return 1
+
+        if isinstance(valor_atual, (int, float)):
+            return type(valor_atual)(valor_atual + 1)
+
+        if isinstance(valor_atual, str) and valor_atual.isdigit():
+            return str(int(valor_atual) + 1)
+
+        return None
+
     def metadata(self) -> Dict[str, Set[str]]:
         return {
             "constraints": listar_constraints_mssql(self.connection),
@@ -239,6 +304,306 @@ def configurar_logger(log_path: str) -> None:
         format="%(asctime)s | %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
+
+
+_TEXT_CODECS = ("utf-8", "latin-1", "cp1252")
+
+
+def _converter_bytes_para_texto(
+    valor: bytes,
+    estatisticas: Optional[Dict[str, Dict[str, int]]] = None,
+    coluna: Optional[str] = None,
+) -> str:
+    for codec in _TEXT_CODECS:
+        try:
+            texto = valor.decode(codec)
+        except UnicodeDecodeError:
+            continue
+        except Exception:
+            logging.debug(
+                "Codec %s não pôde ser usado para decodificar valor em bytes",
+                codec,
+                exc_info=True,
+            )
+            continue
+
+        try:
+            if texto.encode(codec) != valor:
+                raise UnicodeError("Decodificação não é reversível")
+        except Exception:
+            logging.debug(
+                "Codec %s alteraria o conteúdo original durante a recodificação",
+                codec,
+                exc_info=True,
+            )
+            continue
+
+        if estatisticas is not None and coluna is not None and codec != "utf-8":
+            estatisticas[coluna][f"codec:{codec}"] += 1
+        return texto
+
+    texto = valor.decode("latin-1", errors="replace")
+    if estatisticas is not None and coluna is not None:
+        estatisticas[coluna]["indecifrado"] += 1
+    return texto
+
+
+def _normalizar_valor_para_comparacao(valor: object) -> object:
+    if isinstance(valor, bytes):
+        return _converter_bytes_para_texto(valor)
+    return valor
+
+
+def _tentar_decodificar_bytes(
+    valor: bytes, codec: str, log_fn: LogFunction
+) -> Optional[str]:
+    try:
+        texto = valor.decode(codec)
+    except Exception as erro:
+        log_fn(
+            f"[WARN] Falha ao decodificar bytes com codec '{codec}': {erro}. Tente outra opção."
+        )
+        logging.warning(
+            "Falha ao decodificar valor em bytes",
+            exc_info=True,
+        )
+        return None
+
+    try:
+        if texto.encode(codec) != valor:
+            raise UnicodeError("Round-trip inconsistente")
+    except Exception as erro:
+        log_fn(
+            f"[WARN] Decodificação com codec '{codec}' alteraria o conteúdo original: {erro}."
+        )
+        logging.warning(
+            "Decodificação com perda detectada para codec %s",
+            codec,
+            exc_info=True,
+        )
+        return None
+
+    return texto
+
+
+def _registrar_resumo_sanitizacao(
+    estatisticas: Dict[str, Dict[str, int]], log_fn: LogFunction
+) -> None:
+    mensagens: List[str] = []
+    for coluna in sorted(estatisticas.keys()):
+        eventos = estatisticas[coluna]
+        for chave_evento, quantidade in sorted(eventos.items()):
+            if chave_evento.startswith("codec:"):
+                codec = chave_evento.split(":", 1)[1]
+                mensagens.append(
+                    f"Coluna '{coluna}': {quantidade} valor(es) decodificado(s) com codec {codec}."
+                )
+            elif chave_evento == "indecifrado":
+                mensagens.append(
+                    f"Coluna '{coluna}': {quantidade} valor(es) não pôde/puderam ser decodificados e permaneceram em bytes."
+                )
+
+    if not mensagens:
+        return
+
+    log_fn("[WARN] Resumo de ajustes aplicados ao lote:")
+    logging.warning("Resumo de ajustes aplicados ao lote:")
+    for mensagem in mensagens:
+        log_fn(f" - {mensagem}")
+        logging.warning(mensagem)
+
+
+def sanitizar_lote(
+    lote: Sequence[Sequence[object]],
+    colunas: Sequence[str],
+    log_fn: LogFunction = print,
+) -> Sequence[Tuple[object, ...]]:
+    lote_tratado: List[Tuple[object, ...]] = []
+    estatisticas: Dict[str, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
+
+    for indice_linha, linha in enumerate(lote, start=1):
+        nova_linha: List[object] = []
+        for indice_coluna, valor in enumerate(linha):
+            if isinstance(valor, bytes):
+                coluna = colunas[indice_coluna]
+                texto = _converter_bytes_para_texto(valor, estatisticas, coluna)
+                nova_linha.append(texto)
+            else:
+                nova_linha.append(valor)
+        lote_tratado.append(tuple(nova_linha))
+
+    _registrar_resumo_sanitizacao(estatisticas, log_fn)
+    return lote_tratado
+
+
+def _ajustar_coluna_manual(
+    coluna: str,
+    valor: object,
+    log_fn: LogFunction,
+    sugestao: Optional[object] = None,
+) -> object:
+    if isinstance(valor, bytes):
+        log_fn(
+            f"Coluna '{coluna}' contém dados binários ({len(valor)} bytes). "
+            "Escolha como deseja tratar o valor."
+        )
+        trecho = valor[:60]
+        log_fn(f"Pré-visualização (primeiros 60 bytes): {trecho!r}")
+        while True:
+            log_fn(
+                "Opções disponíveis: 1) UTF-8  2) Latin-1  3) Informar manualmente  "
+                "4) Usar NULL  5) Manter bytes"
+            )
+            escolha = (
+                input(f"Selecione uma opção para '{coluna}' [1-5]: ").strip() or "1"
+            )
+            if escolha == "1":
+                decodificado = _tentar_decodificar_bytes(valor, "utf-8", log_fn)
+                if decodificado is not None:
+                    return decodificado
+                continue
+            if escolha == "2":
+                decodificado = _tentar_decodificar_bytes(valor, "latin-1", log_fn)
+                if decodificado is not None:
+                    return decodificado
+                continue
+            if escolha == "3":
+                return input(f"Digite o novo valor textual para '{coluna}': ")
+            if escolha == "4":
+                return None
+            if escolha == "5":
+                return valor
+            log_fn("Opção inválida. Tente novamente.")
+    if sugestao is not None:
+        log_fn(f"Sugestão para '{coluna}': {sugestao!r}")
+        prompt = (
+            f"Coluna '{coluna}' possui valor {valor!r}. Pressione Enter para aceitar a "
+            "sugestão, digite um novo valor ou 'NULL' para gravar nulo: "
+        )
+    else:
+        prompt = (
+            f"Coluna '{coluna}' possui valor {valor!r}. Pressione Enter para manter, "
+            "digite um novo valor ou 'NULL' para gravar nulo: "
+        )
+    while True:
+        entrada = input(prompt)
+        if entrada == "":
+            if sugestao is not None:
+                return sugestao
+            return valor
+        if entrada.upper() == "NULL":
+            return None
+        return entrada
+
+
+def _corrigir_registro_manual(
+    colunas: Sequence[str],
+    registro: Sequence[object],
+    original: Sequence[object],
+    log_fn: LogFunction,
+    colunas_prioritarias: Optional[Sequence[str]] = None,
+    sugestoes: Optional[Dict[str, object]] = None,
+) -> Tuple[object, ...]:
+    log_fn("📝 Ajuste manual necessário. Informe novos valores para o registro.")
+    valores = list(registro)
+    prioridades = set(colunas_prioritarias or [])
+    sugestoes = sugestoes or {}
+
+    for indice, coluna in enumerate(colunas):
+        valor_atual = valores[indice] if indice < len(valores) else None
+        valor_original = original[indice] if indice < len(original) else None
+
+        if coluna not in prioridades:
+            if _normalizar_valor_para_comparacao(
+                valor_atual
+            ) == _normalizar_valor_para_comparacao(valor_original):
+                continue
+
+        novo_valor = _ajustar_coluna_manual(
+            coluna,
+            valor_atual,
+            log_fn,
+            sugestao=sugestoes.get(coluna),
+        )
+
+        if indice < len(valores):
+            valores[indice] = novo_valor
+        else:
+            valores.append(novo_valor)
+    return tuple(valores)
+
+
+def _inserir_registros_com_intervencao(
+    destino_handler: BaseDestinationHandler,
+    tabela: str,
+    colunas: Sequence[str],
+    registros: Sequence[Sequence[object]],
+    registros_originais: Sequence[Sequence[object]],
+    log_fn: LogFunction,
+) -> int:
+    inseridos = 0
+    for linha_indice, registro in enumerate(registros, start=1):
+        valores = tuple(registro)
+        original = (
+            tuple(registros_originais[linha_indice - 1])
+            if linha_indice - 1 < len(registros_originais)
+            else valores
+        )
+        while True:
+            try:
+                destino_handler.insert_batch(tabela, colunas, [valores])
+                inseridos += 1
+                log_fn(
+                    f"✅ Registro {linha_indice} inserido com sucesso após intervenção manual."
+                )
+                logging.info(
+                    "Registro inserido após intervenção manual",
+                    extra={"tabela": tabela, "linha": linha_indice},
+                )
+                break
+            except Exception as erro:
+                mensagem = (
+                    f"[ERRO] Falha ao inserir registro {linha_indice}: {erro}. "
+                    "Informe novos valores."
+                )
+                log_fn(mensagem)
+                logging.error(mensagem)
+                descricao_erro = " ".join(
+                    str(parte) for parte in getattr(erro, "args", []) if parte
+                )
+                if not descricao_erro:
+                    descricao_erro = str(erro)
+
+                colunas_prioritarias: Sequence[str] = []
+                sugestoes: Dict[str, object] = {}
+                if descricao_erro and _erro_indica_duplicidade(descricao_erro):
+                    pk_colunas = destino_handler.primary_key_columns(tabela)
+                    if pk_colunas:
+                        log_fn(
+                            "[WARN] Duplicidade detectada na chave primária. Informe novos valores."
+                        )
+                        colunas_prioritarias = pk_colunas
+                        for coluna_pk in pk_colunas:
+                            sugestao = destino_handler.suggest_new_primary_key_value(
+                                tabela, coluna_pk
+                            )
+                            if sugestao is not None:
+                                sugestoes[coluna_pk] = sugestao
+
+                valores = _corrigir_registro_manual(
+                    colunas,
+                    valores,
+                    original,
+                    log_fn,
+                    colunas_prioritarias=colunas_prioritarias,
+                    sugestoes=sugestoes,
+                )
+    return inseridos
+
+
+def _erro_indica_duplicidade(descricao: str) -> bool:
+    texto = descricao.lower()
+    return "duplicate" in texto or "duplic" in texto or "primary key" in texto
 
 
 def _criar_handler_destino(
@@ -390,21 +755,41 @@ def executar_dump(
             ):
                 if cancel_event and cancel_event.is_set():
                     raise OperationCancelled("Processo cancelado pelo usuário.")
+                registros_brutos = [tuple(linha) for linha in lote]
+                registros_lote = sanitizar_lote(registros_brutos, colunas, log_fn)
                 try:
-                    destino_handler.insert_batch(tabela, colunas, lote)
+                    destino_handler.insert_batch(tabela, colunas, registros_lote)
                     offset += chunk_size
-                    total_inseridos += len(lote)
+                    total_inseridos += len(registros_lote)
                     log_fn(
-                        f"✅ Lote {indice}/{total_lotes} exportado ({len(lote)} registros)"
+                        f"✅ Lote {indice}/{total_lotes} exportado ({len(registros_lote)} registros)"
                     )
                     logging.info(
-                        f"Tabela: {tabela} | Lote {indice} | {len(lote)} registros transferidos"
+                        f"Tabela: {tabela} | Lote {indice} | {len(registros_lote)} registros transferidos"
                     )
                 except Exception as erro_lote:
-                    mensagem = f"[ERRO] no lote {indice}: {erro_lote}"
+                    mensagem = (
+                        f"[ERRO] Falha ao inserir lote {indice}: {erro_lote}. "
+                        "Tentando inserir registros individualmente."
+                    )
                     log_fn(mensagem)
                     logging.error(mensagem)
-                    break
+                    inseridos = _inserir_registros_com_intervencao(
+                        destino_handler,
+                        tabela,
+                        colunas,
+                        registros_lote,
+                        registros_brutos,
+                        log_fn,
+                    )
+                    total_inseridos += inseridos
+                    offset += chunk_size
+                    log_fn(
+                        f"✅ Lote {indice}/{total_lotes} concluído com intervenção manual ({inseridos} registros)."
+                    )
+                    logging.info(
+                        f"Tabela: {tabela} | Lote {indice} concluído após intervenção manual"
+                    )
         finally:
             destino_handler.after_inserts(tabela)
 
