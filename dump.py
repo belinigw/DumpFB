@@ -1,6 +1,7 @@
 import logging
 import threading
 import time
+from collections import defaultdict
 from dataclasses import dataclass
 from typing import Callable, Dict, Iterable, Optional, Sequence, Set, Tuple, List
 
@@ -241,36 +242,50 @@ def configurar_logger(log_path: str) -> None:
     )
 
 
-def sanitizar_lote(
-    lote: Sequence[Sequence[object]],
-    colunas: Sequence[str],
-    log_fn: LogFunction = print,
-) -> List[Tuple[object, ...]]:
-    registros_tratados: List[Tuple[object, ...]] = []
-    for registro in lote:
-        valores = list(registro)
-        for indice, coluna in enumerate(colunas):
-            if indice >= len(valores):
-                break
-            valor_atual = valores[indice]
-            if isinstance(valor_atual, bytes):
-                decodificado = None
-                try:
-                    decodificado = valor_atual.decode("utf-8")
-                except Exception:
-                    mensagem = f"Falha ao decodificar bytes na coluna '{coluna}'. Valor substituído por None."
-                    log_fn(mensagem)
-                    logging.warning(mensagem)
-                valores[indice] = decodificado
-        registros_tratados.append(tuple(valores))
-    return registros_tratados
+_TEXT_CODECS = ("utf-8", "latin-1", "cp1252")
+
+
+def _parece_texto(valor: str) -> bool:
+    if not valor:
+        return True
+
+    total = len(valor)
+    legiveis = sum(
+        1 for caractere in valor if caractere.isprintable() or caractere in "\r\n\t"
+    )
+    return legiveis / total >= 0.9
+
+
+def _decodificar_bytes_sem_perda(valor: bytes) -> Tuple[Optional[str], Optional[str]]:
+    for codec in _TEXT_CODECS:
+        try:
+            texto = valor.decode(codec)
+        except UnicodeDecodeError:
+            continue
+        except Exception:
+            logging.debug(
+                "Codec %s não pôde ser usado para decodificar valor em bytes",
+                codec,
+                exc_info=True,
+            )
+            continue
+        try:
+            if texto.encode(codec) == valor and _parece_texto(texto):
+                return texto, codec
+        except Exception:
+            logging.debug(
+                "Falha ao revalidar valor após decodificação com codec %s",
+                codec,
+                exc_info=True,
+            )
+    return None, None
 
 
 def _tentar_decodificar_bytes(
     valor: bytes, codec: str, log_fn: LogFunction
 ) -> Optional[str]:
     try:
-        return valor.decode(codec)
+        texto = valor.decode(codec)
     except Exception as erro:
         log_fn(
             f"[WARN] Falha ao decodificar bytes com codec '{codec}': {erro}. Tente outra opção."
@@ -279,7 +294,80 @@ def _tentar_decodificar_bytes(
             "Falha ao decodificar valor em bytes",
             exc_info=True,
         )
-    return None
+        return None
+
+    try:
+        if texto.encode(codec) != valor:
+            raise UnicodeError("Round-trip inconsistente")
+    except Exception as erro:
+        log_fn(
+            f"[WARN] Decodificação com codec '{codec}' alteraria o conteúdo original: {erro}."
+        )
+        logging.warning(
+            "Decodificação com perda detectada para codec %s",
+            codec,
+            exc_info=True,
+        )
+        return None
+
+    return texto
+
+
+def _registrar_resumo_sanitizacao(
+    estatisticas: Dict[str, Dict[str, int]], log_fn: LogFunction
+) -> None:
+    mensagens: List[str] = []
+    for coluna in sorted(estatisticas.keys()):
+        eventos = estatisticas[coluna]
+        for chave_evento, quantidade in sorted(eventos.items()):
+            if chave_evento.startswith("codec:"):
+                codec = chave_evento.split(":", 1)[1]
+                mensagens.append(
+                    f"Coluna '{coluna}': {quantidade} valor(es) decodificado(s) com codec {codec}."
+                )
+            elif chave_evento == "indecifrado":
+                mensagens.append(
+                    f"Coluna '{coluna}': {quantidade} valor(es) não pôde/puderam ser decodificados e permaneceram em bytes."
+                )
+
+    if not mensagens:
+        return
+
+    log_fn("[WARN] Resumo de ajustes aplicados ao lote:")
+    logging.warning("Resumo de ajustes aplicados ao lote:")
+    for mensagem in mensagens:
+        log_fn(f" - {mensagem}")
+        logging.warning(mensagem)
+
+
+def sanitizar_lote(
+    lote: Sequence[Sequence[object]],
+    colunas: Sequence[str],
+    log_fn: LogFunction = print,
+) -> Sequence[Tuple[object, ...]]:
+    lote_tratado: List[Tuple[object, ...]] = []
+    estatisticas: Dict[str, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
+
+    for indice_linha, linha in enumerate(lote, start=1):
+        nova_linha: List[object] = []
+        for indice_coluna, valor in enumerate(linha):
+            if isinstance(valor, bytes):
+                texto, codec_utilizado = _decodificar_bytes_sem_perda(valor)
+                if texto is not None and codec_utilizado is not None:
+                    nova_linha.append(texto)
+                    if codec_utilizado != "utf-8":
+                        coluna = colunas[indice_coluna]
+                        estatisticas[coluna][f"codec:{codec_utilizado}"] += 1
+                else:
+                    nova_linha.append(valor)
+                    coluna = colunas[indice_coluna]
+                    estatisticas[coluna]["indecifrado"] += 1
+            else:
+                nova_linha.append(valor)
+        lote_tratado.append(tuple(nova_linha))
+
+    _registrar_resumo_sanitizacao(estatisticas, log_fn)
+    return lote_tratado
 
 
 def _ajustar_coluna_manual(coluna: str, valor: object, log_fn: LogFunction) -> object:
@@ -524,7 +612,8 @@ def executar_dump(
             ):
                 if cancel_event and cancel_event.is_set():
                     raise OperationCancelled("Processo cancelado pelo usuário.")
-                registros_lote = [tuple(linha) for linha in lote]
+                registros_brutos = [tuple(linha) for linha in lote]
+                registros_lote = sanitizar_lote(registros_brutos, colunas, log_fn)
                 try:
                     destino_handler.insert_batch(tabela, colunas, registros_lote)
                     offset += chunk_size
