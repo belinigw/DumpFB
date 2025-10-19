@@ -36,6 +36,12 @@ BUTTON_COLORS = {
         "activebackground": "#006064",
         "activeforeground": "#FFFFFF",
     },
+    "danger": {
+        "background": "#E53935",
+        "foreground": "#FFFFFF",
+        "activebackground": "#C62828",
+        "activeforeground": "#FFFFFF",
+    },
 }
 
 
@@ -391,6 +397,7 @@ def criar_interface():
     def executar_em_thread(acao):
         if estado_operacao["em_andamento"]:
             return
+        controller.reset_cancel_event()
         iniciar_operacao()
 
         def wrapper():
@@ -458,6 +465,12 @@ def criar_interface():
 
         executar_em_thread(acao)
 
+    def limpar_banco_destino():
+        def acao():
+            controller.clear_destination_database(log_message)
+
+        executar_em_thread(acao)
+
     def contar_registros():
         tabelas = obter_tabelas_selecionadas()
         if not tabelas:
@@ -485,6 +498,13 @@ def criar_interface():
         messagebox.showinfo(
             "SQL copiado", "Comandos SQL copiados para a área de transferência."
         )
+
+    def cancelar_operacao():
+        if not estado_operacao["em_andamento"]:
+            log_message("ℹ️ Nenhuma operação em andamento para cancelar.")
+            return
+        controller.cancel_current_operation()
+        log_message("⏹️ Cancelamento solicitado. Aguardando finalização segura...")
 
     def abrir_configuracoes():
         config_atual = controller.get_config()
@@ -539,6 +559,13 @@ def criar_interface():
         chunk_entry.pack(side=tk.LEFT, padx=(5, 0))
         chunk_entry.insert(0, str(config_atual["settings"].get("chunk_size", 5000)))
 
+        linha_workers = tk.Frame(settings_frame)
+        linha_workers.pack(fill="x", pady=5)
+        tk.Label(linha_workers, text="Trabalhadores paralelos:").pack(side=tk.LEFT)
+        workers_entry = tk.Entry(linha_workers, width=10)
+        workers_entry.pack(side=tk.LEFT, padx=(5, 0))
+        workers_entry.insert(0, str(config_atual["settings"].get("worker_count", 1)))
+
         linha_log = tk.Frame(settings_frame)
         linha_log.pack(fill="x", pady=5)
         tk.Label(linha_log, text="Caminho do Log:").pack(side=tk.LEFT)
@@ -560,6 +587,7 @@ def criar_interface():
                     novo_config[chave] = editor.obter_dados()
                 novo_config["settings"] = {
                     "chunk_size": int(chunk_entry.get().strip()),
+                    "worker_count": int(workers_entry.get().strip()),
                     "log_path": log_entry.get().strip(),
                     "info_query": info_text.get("1.0", tk.END).strip(),
                 }
@@ -601,6 +629,17 @@ def criar_interface():
     )
     botao_atualizar.grid(row=0, column=3, padx=5, pady=5)
     botoes_operacoes.append(botao_atualizar)
+
+    botao_limpar = criar_botao_colorido(
+        botoes_superiores, "Limpar Banco", limpar_banco_destino, estilo="warning"
+    )
+    botao_limpar.grid(row=0, column=4, padx=5, pady=5)
+    botoes_operacoes.append(botao_limpar)
+
+    botao_cancelar = criar_botao_colorido(
+        botoes_superiores, "Cancelar", cancelar_operacao, estilo="danger"
+    )
+    botao_cancelar.grid(row=0, column=5, padx=5, pady=5)
 
     botoes_inferiores = tk.Frame(root)
     botoes_inferiores.pack(pady=5)
