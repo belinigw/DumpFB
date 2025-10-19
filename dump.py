@@ -1,4 +1,5 @@
 import logging
+import threading
 import time
 from dataclasses import dataclass
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
@@ -40,6 +41,12 @@ from db_mssql import (
 SQLLogger = Optional[Callable[[str], None]]
 LogFunction = Callable[[str], None]
 ConstraintResolver = Optional[Callable[[str, str], Optional[str]]]
+
+
+class OperationCancelled(Exception):
+    """Raised when the current migration was cancelled by the user."""
+
+    pass
 
 
 @dataclass
@@ -303,6 +310,8 @@ def executar_dump(
     sql_logger: SQLLogger = None,
     constraint_resolver: ConstraintResolver = None,
     gerenciar_constraints: bool = True,
+    cancel_event: Optional[threading.Event] = None,
+    limpar_destino: bool = True,
 ) -> MigrationSummary:
     chunk_size = config["settings"]["chunk_size"]
     log_path = config["settings"]["log_path"]
@@ -356,20 +365,31 @@ def executar_dump(
 
     resumo: Optional[MigrationSummary] = None
     constraints_pendentes: Sequence[Tuple[str, str]] = []
+    cancelado = False
     try:
         try:
             if gerenciar_constraints and destino_handler.supports_constraints:
                 log_fn("⛔ Desativando constraints de todas as tabelas do destino...")
                 destino_handler.disable_constraints()
 
-            log_fn(f"🧹 Limpando dados existentes na tabela de destino '{tabela}'...")
-            destino_handler.clear_table(tabela)
+            if cancel_event and cancel_event.is_set():
+                raise OperationCancelled(
+                    "Processo cancelado antes da limpeza do destino."
+                )
+
+            if limpar_destino:
+                log_fn(
+                    f"🧹 Limpando dados existentes na tabela de destino '{tabela}'..."
+                )
+                destino_handler.clear_table(tabela)
 
             destino_handler.before_inserts(tabela)
 
             for indice, lote in enumerate(
                 buscar_lotes_firebird(con_origem, tabela, chunk_size, offset), start=1
             ):
+                if cancel_event and cancel_event.is_set():
+                    raise OperationCancelled("Processo cancelado pelo usuário.")
                 try:
                     destino_handler.insert_batch(tabela, colunas, lote)
                     offset += chunk_size
@@ -404,20 +424,34 @@ def executar_dump(
                     logging.error(mensagem_erro)
 
             tempo_total = time.time() - start_time
-            log_fn(
-                f"✅ Dump concluído. Total de registros inseridos: {total_inseridos}"
-            )
-            log_fn(f"⏱️ Tempo total: {tempo_total:.2f} segundos")
-            logging.info(f"Dump finalizado com sucesso em {tempo_total:.2f} segundos")
+            if cancelado:
+                logging.info(
+                    f"Migração da tabela '{tabela}' cancelada após {tempo_total:.2f} segundos"
+                )
+            else:
+                log_fn(
+                    f"✅ Dump concluído. Total de registros inseridos: {total_inseridos}"
+                )
+                log_fn(f"⏱️ Tempo total: {tempo_total:.2f} segundos")
+                logging.info(
+                    f"Dump finalizado com sucesso em {tempo_total:.2f} segundos"
+                )
 
-            comparacao_modelo = _comparar_modelo(config, destino_handler, sql_logger)
+                comparacao_modelo = _comparar_modelo(
+                    config, destino_handler, sql_logger
+                )
 
-            resumo = MigrationSummary(
-                total_inseridos=total_inseridos,
-                tempo_total=tempo_total,
-                constraints_pendentes=constraints_pendentes,
-                comparacao_modelo=comparacao_modelo,
-            )
+                resumo = MigrationSummary(
+                    total_inseridos=total_inseridos,
+                    tempo_total=tempo_total,
+                    constraints_pendentes=constraints_pendentes,
+                    comparacao_modelo=comparacao_modelo,
+                )
+    except OperationCancelled:
+        cancelado = True
+        log_fn(f"⏹️ Migração da tabela '{tabela}' cancelada pelo usuário.")
+        logging.info(f"Migração da tabela '{tabela}' cancelada pelo usuário.")
+        raise
     finally:
         if fechar_destino and con_destino:
             try:
