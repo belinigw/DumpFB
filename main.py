@@ -1,7 +1,7 @@
-import tkinter as tk
-from tkinter import messagebox
 import json
 import threading
+import tkinter as tk
+from tkinter import messagebox
 from typing import List
 
 from dump import executar_dump
@@ -10,15 +10,69 @@ from db_mssql import conectar_mssql
 
 CONFIG_PATH = "config.json"
 
+BUTTON_COLORS = {
+    "primary": {
+        "background": "#1976D2",
+        "foreground": "#FFFFFF",
+        "activebackground": "#115293",
+        "activeforeground": "#FFFFFF",
+    },
+    "secondary": {
+        "background": "#455A64",
+        "foreground": "#FFFFFF",
+        "activebackground": "#1C313A",
+        "activeforeground": "#FFFFFF",
+    },
+    "success": {
+        "background": "#2E7D32",
+        "foreground": "#FFFFFF",
+        "activebackground": "#1B5E20",
+        "activeforeground": "#FFFFFF",
+    },
+    "warning": {
+        "background": "#F9A825",
+        "foreground": "#1A1A1A",
+        "activebackground": "#F57F17",
+        "activeforeground": "#1A1A1A",
+    },
+    "info": {
+        "background": "#0288D1",
+        "foreground": "#FFFFFF",
+        "activebackground": "#01579B",
+        "activeforeground": "#FFFFFF",
+    },
+}
+
+
+def criar_botao_colorido(
+    parent, texto, comando, *, estilo="primary", fonte=("Arial", 10)
+):
+    cores = BUTTON_COLORS.get(estilo, BUTTON_COLORS["primary"])
+    return tk.Button(
+        parent,
+        text=texto,
+        font=fonte,
+        command=comando,
+        bg=cores["background"],
+        fg=cores["foreground"],
+        activebackground=cores["activebackground"],
+        activeforeground=cores["activeforeground"],
+        relief=tk.RAISED,
+        bd=1,
+        cursor="hand2",
+        padx=10,
+        pady=5,
+    )
+
 
 def carregar_config():
-    with open(CONFIG_PATH, "r") as f:
-        return json.load(f)
+    with open(CONFIG_PATH, "r") as arquivo:
+        return json.load(arquivo)
 
 
-def salvar_config(config):
-    with open(CONFIG_PATH, "w") as f:
-        json.dump(config, f, indent=2)
+def salvar_config(configuracoes):
+    with open(CONFIG_PATH, "w") as arquivo:
+        json.dump(configuracoes, arquivo, indent=2)
 
 
 def escrever_saida(caixa_saida, texto):
@@ -27,15 +81,15 @@ def escrever_saida(caixa_saida, texto):
 
 
 class TableSelector(tk.Frame):
-    def __init__(self, master, columns=3):
+    def __init__(self, master, columns: int = 3):
         super().__init__(master)
         self.columns = max(1, columns)
         self.all_tables: List[str] = []
         self.selected_tables = set()
-        self.check_vars = {}
+        self.checkbutton_variables = {}
 
-        self.search_var = tk.StringVar()
-        self.search_var.trace_add("write", self._on_search_change)
+        self.search_value = tk.StringVar()
+        self.search_value.trace_add("write", self._on_search_change)
 
         search_frame = tk.Frame(self)
         search_frame.pack(fill="x", padx=10, pady=(0, 5))
@@ -45,7 +99,7 @@ class TableSelector(tk.Frame):
         )
 
         self.search_entry = tk.Entry(
-            search_frame, textvariable=self.search_var, font=("Arial", 11)
+            search_frame, textvariable=self.search_value, font=("Arial", 11)
         )
         self.search_entry.pack(side=tk.LEFT, fill="x", expand=True, padx=(5, 5))
 
@@ -78,9 +132,9 @@ class TableSelector(tk.Frame):
         self.inner_frame.bind("<Configure>", self._update_scroll_region)
 
         self.scrollbar_horizontal = tk.Scrollbar(
-            self, orient=tk.HORIZONTAL, command=self.canvas.xview
+            list_container, orient=tk.HORIZONTAL, command=self.canvas.xview
         )
-        self.scrollbar_horizontal.pack(fill=tk.X, padx=10, pady=(0, 10))
+        self.scrollbar_horizontal.pack(fill=tk.X, side=tk.BOTTOM)
 
         self.canvas.configure(xscrollcommand=self.scrollbar_horizontal.set)
 
@@ -96,7 +150,7 @@ class TableSelector(tk.Frame):
         return [t for t in self.all_tables if t in self.selected_tables]
 
     def _filtered_tables(self) -> List[str]:
-        termo = self.search_var.get().strip().lower()
+        termo = self.search_value.get().strip().lower()
         if not termo:
             return list(self.all_tables)
         return [tabela for tabela in self.all_tables if termo in tabela.lower()]
@@ -104,7 +158,7 @@ class TableSelector(tk.Frame):
     def _rebuild_checkbuttons(self):
         for widget in self.inner_frame.winfo_children():
             widget.destroy()
-        self.check_vars.clear()
+        self.checkbutton_variables.clear()
 
         tabelas_filtradas = self._filtered_tables()
 
@@ -120,7 +174,7 @@ class TableSelector(tk.Frame):
 
         for indice, tabela in enumerate(tabelas_filtradas):
             variavel = tk.BooleanVar(value=tabela in self.selected_tables)
-            self.check_vars[tabela] = variavel
+            self.checkbutton_variables[tabela] = variavel
             caixa_selecao = tk.Checkbutton(
                 self.inner_frame,
                 text=tabela,
@@ -147,7 +201,7 @@ class TableSelector(tk.Frame):
             self.selected_tables.discard(tabela)
 
     def _clear_search(self):
-        self.search_var.set("")
+        self.search_value.set("")
 
     def _on_search_change(self, *_):
         self._rebuild_checkbuttons()
@@ -168,14 +222,14 @@ def executar_migracao(table_selector, caixa_saida):
 
     def run():
         try:
-            config = carregar_config()
+            configuracoes = carregar_config()
             for tabela in tabelas:
                 escrever_saida(
                     caixa_saida, f"🔄 Iniciando migração da tabela '{tabela}'..."
                 )
                 total, tempo = executar_dump(
                     tabela,
-                    config,
+                    configuracoes,
                     log_fn=lambda msg, tabela=tabela: escrever_saida(
                         caixa_saida, f"[{tabela}] {msg}"
                     ),
@@ -188,30 +242,30 @@ def executar_migracao(table_selector, caixa_saida):
                 caixa_saida,
                 "🚀 Processo finalizado para todas as tabelas selecionadas.",
             )
-        except Exception as e:
-            escrever_saida(caixa_saida, f"[ERRO] {e}")
+        except Exception as erro:
+            escrever_saida(caixa_saida, f"[ERRO] {erro}")
 
     threading.Thread(target=run, daemon=True).start()
 
 
 def testar_conexao_firebird(caixa_saida):
     try:
-        config = carregar_config()
-        con = conectar_firebird(config)
-        con.close()
+        configuracoes = carregar_config()
+        conexao_firebird = conectar_firebird(configuracoes)
+        conexao_firebird.close()
         escrever_saida(caixa_saida, "✅ Conexão com Firebird bem-sucedida.")
-    except Exception as e:
-        escrever_saida(caixa_saida, f"[ERRO] Firebird: {e}")
+    except Exception as erro:
+        escrever_saida(caixa_saida, f"[ERRO] Firebird: {erro}")
 
 
 def testar_conexao_mssql(caixa_saida):
     try:
-        config = carregar_config()
-        con = conectar_mssql(config)
-        con.close()
+        configuracoes = carregar_config()
+        conexao_mssql = conectar_mssql(configuracoes)
+        conexao_mssql.close()
         escrever_saida(caixa_saida, "✅ Conexão com MSSQL bem-sucedida.")
-    except Exception as e:
-        escrever_saida(caixa_saida, f"[ERRO] MSSQL: {e}")
+    except Exception as erro:
+        escrever_saida(caixa_saida, f"[ERRO] MSSQL: {erro}")
 
 
 def contar_registros(table_selector, caixa_saida):
@@ -223,45 +277,42 @@ def contar_registros(table_selector, caixa_saida):
         return
 
     def run():
-        con_fb = None
-        con_sql = None
+        conexao_firebird = None
+        conexao_mssql = None
         try:
-            config = carregar_config()
-            con_fb = conectar_firebird(config)
-            cur_fb = con_fb.cursor()
-            con_sql = conectar_mssql(config)
-            cur_sql = con_sql.cursor()
+            configuracoes = carregar_config()
+            conexao_firebird = conectar_firebird(configuracoes)
+            cursor_firebird = conexao_firebird.cursor()
+            conexao_mssql = conectar_mssql(configuracoes)
+            cursor_mssql = conexao_mssql.cursor()
 
             for tabela in tabelas:
-                cur_fb.execute(f"SELECT COUNT(*) FROM {tabela}")
-                total_fb = cur_fb.fetchone()[0]
+                cursor_firebird.execute(f"SELECT COUNT(*) FROM {tabela}")
+                total_firebird = cursor_firebird.fetchone()[0]
 
-                cur_sql.execute(f"SELECT COUNT(*) FROM {tabela}")
-                total_sql = cur_sql.fetchone()[0]
+                cursor_mssql.execute(f"SELECT COUNT(*) FROM {tabela}")
+                total_mssql = cursor_mssql.fetchone()[0]
 
                 escrever_saida(
                     caixa_saida,
-                    f"📌 {tabela} - Total na origem (Firebird): {total_fb} registros",
+                    f"📌 {tabela} - Total na origem (Firebird): {total_firebird} registros",
                 )
                 escrever_saida(
                     caixa_saida,
-                    f"📌 {tabela} - Total no destino (MSSQL): {total_sql} registros",
+                    f"📌 {tabela} - Total no destino (MSSQL): {total_mssql} registros",
                 )
 
-            con_fb.close()
-            con_sql.close()
-
-        except Exception as e:
-            escrever_saida(caixa_saida, f"[ERRO] ao contar registros: {e}")
+        except Exception as erro:
+            escrever_saida(caixa_saida, f"[ERRO] ao contar registros: {erro}")
         finally:
-            if con_fb:
+            if conexao_firebird:
                 try:
-                    con_fb.close()
+                    conexao_firebird.close()
                 except Exception:
                     pass
-            if con_sql:
+            if conexao_mssql:
                 try:
-                    con_sql.close()
+                    conexao_mssql.close()
                 except Exception:
                     pass
 
@@ -272,11 +323,11 @@ def carregar_tabelas(table_selector, caixa_saida):
     escrever_saida(caixa_saida, "🔄 Carregando tabelas disponíveis do Firebird...")
 
     def run():
-        con = None
+        conexao_firebird = None
         try:
-            config = carregar_config()
-            con = conectar_firebird(config)
-            tabelas = listar_tabelas_firebird(con)
+            configuracoes = carregar_config()
+            conexao_firebird = conectar_firebird(configuracoes)
+            tabelas = listar_tabelas_firebird(conexao_firebird)
 
             def atualizar_lista():
                 table_selector.set_tables(tabelas)
@@ -285,100 +336,102 @@ def carregar_tabelas(table_selector, caixa_saida):
                 )
 
             table_selector.after(0, atualizar_lista)
-        except Exception as e:
+        except Exception as erro:
             table_selector.after(
                 0,
-                lambda: escrever_saida(caixa_saida, f"[ERRO] ao carregar tabelas: {e}"),
+                lambda: escrever_saida(
+                    caixa_saida, f"[ERRO] ao carregar tabelas: {erro}"
+                ),
             )
         finally:
-            if con:
-                con.close()
+            if conexao_firebird:
+                try:
+                    conexao_firebird.close()
+                except Exception:
+                    pass
 
     threading.Thread(target=run, daemon=True).start()
 
 
 def abrir_edicao_config():
-    config = carregar_config()
+    configuracoes = carregar_config()
 
     def salvar_e_fechar():
         try:
-            config["firebird"]["database"] = firebird_db.get()
-            config["firebird"]["host"] = firebird_host.get()
-            config["firebird"]["port"] = int(firebird_port.get())
-            config["firebird"]["user"] = firebird_user.get()
-            config["firebird"]["password"] = firebird_pwd.get()
+            configuracoes["firebird"]["database"] = entrada_firebird_banco.get()
+            configuracoes["firebird"]["host"] = entrada_firebird_host.get()
+            configuracoes["firebird"]["port"] = int(entrada_firebird_porta.get())
+            configuracoes["firebird"]["user"] = entrada_firebird_usuario.get()
+            configuracoes["firebird"]["password"] = entrada_firebird_senha.get()
 
-            config["mssql"]["server"] = mssql_server.get()
-            config["mssql"]["database"] = mssql_db.get()
-            config["mssql"]["user"] = mssql_user.get()
-            config["mssql"]["password"] = mssql_pwd.get()
+            configuracoes["mssql"]["server"] = entrada_mssql_servidor.get()
+            configuracoes["mssql"]["database"] = entrada_mssql_banco.get()
+            configuracoes["mssql"]["user"] = entrada_mssql_usuario.get()
+            configuracoes["mssql"]["password"] = entrada_mssql_senha.get()
 
-            config["settings"]["chunk_size"] = int(chunk_size.get())
-            salvar_config(config)
-            config_window.destroy()
-        except Exception as e:
-            messagebox.showerror("Erro ao salvar", str(e))
+            configuracoes["settings"]["chunk_size"] = int(entrada_tamanho_bloco.get())
+            salvar_config(configuracoes)
+            janela_configuracao.destroy()
+        except Exception as erro:
+            messagebox.showerror("Erro ao salvar", str(erro))
 
-    config_window = tk.Toplevel()
-    config_window.title("Editar Configuração")
-    config_window.geometry("520x550")
+    janela_configuracao = tk.Toplevel()
+    janela_configuracao.title("Editar Configuração")
+    janela_configuracao.geometry("520x550")
 
-    # Firebird
-    tk.Label(config_window, text="Firebird - Caminho do Banco:").pack()
-    firebird_db = tk.Entry(config_window, width=60)
-    firebird_db.insert(0, config["firebird"]["database"])
-    firebird_db.pack()
+    tk.Label(janela_configuracao, text="Firebird - Caminho do Banco:").pack()
+    entrada_firebird_banco = tk.Entry(janela_configuracao, width=60)
+    entrada_firebird_banco.insert(0, configuracoes["firebird"]["database"])
+    entrada_firebird_banco.pack()
 
-    tk.Label(config_window, text="Firebird - Host:").pack()
-    firebird_host = tk.Entry(config_window, width=60)
-    firebird_host.insert(0, config["firebird"]["host"])
-    firebird_host.pack()
+    tk.Label(janela_configuracao, text="Firebird - Host:").pack()
+    entrada_firebird_host = tk.Entry(janela_configuracao, width=60)
+    entrada_firebird_host.insert(0, configuracoes["firebird"]["host"])
+    entrada_firebird_host.pack()
 
-    tk.Label(config_window, text="Firebird - Porta:").pack()
-    firebird_port = tk.Entry(config_window, width=60)
-    firebird_port.insert(0, str(config["firebird"]["port"]))
-    firebird_port.pack()
+    tk.Label(janela_configuracao, text="Firebird - Porta:").pack()
+    entrada_firebird_porta = tk.Entry(janela_configuracao, width=60)
+    entrada_firebird_porta.insert(0, str(configuracoes["firebird"]["port"]))
+    entrada_firebird_porta.pack()
 
-    tk.Label(config_window, text="Firebird - Usuário:").pack()
-    firebird_user = tk.Entry(config_window, width=60)
-    firebird_user.insert(0, config["firebird"]["user"])
-    firebird_user.pack()
+    tk.Label(janela_configuracao, text="Firebird - Usuário:").pack()
+    entrada_firebird_usuario = tk.Entry(janela_configuracao, width=60)
+    entrada_firebird_usuario.insert(0, configuracoes["firebird"]["user"])
+    entrada_firebird_usuario.pack()
 
-    tk.Label(config_window, text="Firebird - Senha:").pack()
-    firebird_pwd = tk.Entry(config_window, width=60)
-    firebird_pwd.insert(0, config["firebird"]["password"])
-    firebird_pwd.pack()
+    tk.Label(janela_configuracao, text="Firebird - Senha:").pack()
+    entrada_firebird_senha = tk.Entry(janela_configuracao, width=60)
+    entrada_firebird_senha.insert(0, configuracoes["firebird"]["password"])
+    entrada_firebird_senha.pack()
 
-    # MSSQL
-    tk.Label(config_window, text="MSSQL - Servidor:").pack()
-    mssql_server = tk.Entry(config_window, width=60)
-    mssql_server.insert(0, config["mssql"]["server"])
-    mssql_server.pack()
+    tk.Label(janela_configuracao, text="MSSQL - Servidor:").pack()
+    entrada_mssql_servidor = tk.Entry(janela_configuracao, width=60)
+    entrada_mssql_servidor.insert(0, configuracoes["mssql"]["server"])
+    entrada_mssql_servidor.pack()
 
-    tk.Label(config_window, text="MSSQL - Nome do Banco:").pack()
-    mssql_db = tk.Entry(config_window, width=60)
-    mssql_db.insert(0, config["mssql"]["database"])
-    mssql_db.pack()
+    tk.Label(janela_configuracao, text="MSSQL - Nome do Banco:").pack()
+    entrada_mssql_banco = tk.Entry(janela_configuracao, width=60)
+    entrada_mssql_banco.insert(0, configuracoes["mssql"]["database"])
+    entrada_mssql_banco.pack()
 
-    tk.Label(config_window, text="MSSQL - Usuário:").pack()
-    mssql_user = tk.Entry(config_window, width=60)
-    mssql_user.insert(0, config["mssql"]["user"])
-    mssql_user.pack()
+    tk.Label(janela_configuracao, text="MSSQL - Usuário:").pack()
+    entrada_mssql_usuario = tk.Entry(janela_configuracao, width=60)
+    entrada_mssql_usuario.insert(0, configuracoes["mssql"]["user"])
+    entrada_mssql_usuario.pack()
 
-    tk.Label(config_window, text="MSSQL - Senha:").pack()
-    mssql_pwd = tk.Entry(config_window, width=60)
-    mssql_pwd.insert(0, config["mssql"]["password"])
-    mssql_pwd.pack()
+    tk.Label(janela_configuracao, text="MSSQL - Senha:").pack()
+    entrada_mssql_senha = tk.Entry(janela_configuracao, width=60)
+    entrada_mssql_senha.insert(0, configuracoes["mssql"]["password"])
+    entrada_mssql_senha.pack()
 
-    # Outros
-    tk.Label(config_window, text="Tamanho do bloco (chunk_size):").pack()
-    chunk_size = tk.Entry(config_window, width=20)
-    chunk_size.insert(0, str(config["settings"]["chunk_size"]))
-    chunk_size.pack()
+    tk.Label(janela_configuracao, text="Tamanho do bloco (chunk_size):").pack()
+    entrada_tamanho_bloco = tk.Entry(janela_configuracao, width=20)
+    entrada_tamanho_bloco.insert(0, str(configuracoes["settings"]["chunk_size"]))
+    entrada_tamanho_bloco.pack()
 
-    tk.Button(config_window, text="Salvar Configuração", command=salvar_e_fechar).pack(
-        pady=10
-    )
+    criar_botao_colorido(
+        janela_configuracao, "Salvar Configuração", salvar_e_fechar, estilo="success"
+    ).pack(pady=10)
 
 
 def criar_interface():
