@@ -7,33 +7,33 @@ from controller import ApplicationController
 
 BUTTON_COLORS = {
     "primary": {
-        "background": "#1976D2",
+        "background": "#1E88E5",
         "foreground": "#FFFFFF",
-        "activebackground": "#115293",
+        "activebackground": "#1565C0",
         "activeforeground": "#FFFFFF",
     },
     "secondary": {
-        "background": "#455A64",
+        "background": "#78909C",
         "foreground": "#FFFFFF",
-        "activebackground": "#1C313A",
+        "activebackground": "#546E7A",
         "activeforeground": "#FFFFFF",
     },
     "success": {
-        "background": "#2E7D32",
+        "background": "#43A047",
         "foreground": "#FFFFFF",
-        "activebackground": "#1B5E20",
+        "activebackground": "#2E7D32",
         "activeforeground": "#FFFFFF",
     },
     "warning": {
-        "background": "#F9A825",
+        "background": "#FB8C00",
         "foreground": "#1A1A1A",
-        "activebackground": "#F57F17",
+        "activebackground": "#EF6C00",
         "activeforeground": "#1A1A1A",
     },
     "info": {
-        "background": "#0288D1",
+        "background": "#00838F",
         "foreground": "#FFFFFF",
-        "activebackground": "#01579B",
+        "activebackground": "#006064",
         "activeforeground": "#FFFFFF",
     },
 }
@@ -57,6 +57,8 @@ def criar_botao_colorido(
         cursor="hand2",
         padx=10,
         pady=5,
+        disabledforeground="#CFD8DC",
+        highlightthickness=0,
     )
 
 
@@ -89,6 +91,14 @@ class TableSelector(tk.Frame):
             "Limpar",
             self._clear_search,
             estilo="secondary",
+            fonte=("Arial", 10),
+        ).pack(side=tk.LEFT, padx=(5, 0))
+
+        criar_botao_colorido(
+            search_frame,
+            "Selecionar Todas",
+            self.select_all_tables,
+            estilo="info",
             fonte=("Arial", 10),
         ).pack(side=tk.LEFT, padx=(5, 0))
 
@@ -130,6 +140,11 @@ class TableSelector(tk.Frame):
 
     def get_selected_tables(self) -> List[str]:
         return [t for t in self.all_tables if t in self.selected_tables]
+
+    def select_all_tables(self):
+        self.selected_tables = set(self.all_tables)
+        for tabela, variavel in self.checkbutton_variables.items():
+            variavel.set(True)
 
     def _filtered_tables(self) -> List[str]:
         termo = self.search_value.get().strip().lower()
@@ -479,17 +494,42 @@ def criar_interface():
         janela.geometry("680x700")
         janela.transient(root)
 
+        scroll_container = tk.Frame(janela)
+        scroll_container.pack(fill="both", expand=True)
+
+        canvas = tk.Canvas(scroll_container, highlightthickness=0)
+        canvas.pack(side=tk.LEFT, fill="both", expand=True)
+
+        scrollbar = tk.Scrollbar(
+            scroll_container, orient=tk.VERTICAL, command=canvas.yview
+        )
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        conteudo = tk.Frame(canvas)
+        canvas_window = canvas.create_window((0, 0), window=conteudo, anchor="nw")
+
+        def _atualizar_scroll(_event=None):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        def _ajustar_largura(event):
+            canvas.itemconfigure(canvas_window, width=event.width)
+
+        conteudo.bind("<Configure>", _atualizar_scroll)
+        canvas.bind("<Configure>", _ajustar_largura)
+
         editores = {}
         for chave, titulo in (
             ("source", "Origem"),
             ("destination", "Destino"),
             ("model", "Banco Modelo"),
         ):
-            editor = ConnectionEditor(janela, titulo, config_atual.get(chave, {}))
+            editor = ConnectionEditor(conteudo, titulo, config_atual.get(chave, {}))
             editor.pack(fill="x", padx=10, pady=10)
             editores[chave] = editor
 
-        settings_frame = tk.LabelFrame(janela, text="Configurações Gerais")
+        settings_frame = tk.LabelFrame(conteudo, text="Configurações Gerais")
         settings_frame.pack(fill="x", padx=10, pady=10)
 
         linha_chunk = tk.Frame(settings_frame)
@@ -531,7 +571,12 @@ def criar_interface():
             except Exception as erro:
                 messagebox.showerror("Erro ao salvar", str(erro))
 
-        criar_botao_colorido(janela, "Salvar", salvar, estilo="success").pack(pady=10)
+        botoes_inferiores = tk.Frame(janela)
+        botoes_inferiores.pack(fill="x", pady=10)
+
+        criar_botao_colorido(
+            botoes_inferiores, "Salvar", salvar, estilo="success"
+        ).pack()
 
     botao_conectar = criar_botao_colorido(
         botoes_superiores, "Conectar", conectar, estilo="primary"
