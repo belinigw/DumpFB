@@ -3,7 +3,7 @@ import threading
 import time
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Callable, Dict, Iterable, Optional, Sequence, Set, Tuple, List
 
 from db_firebird import (
     buscar_lotes_firebird,
