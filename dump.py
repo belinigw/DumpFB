@@ -309,10 +309,22 @@ def configurar_logger(log_path: str) -> None:
 _TEXT_CODECS = ("utf-8", "latin-1", "cp1252")
 
 
+def _registrar_evento(
+    estatisticas: Optional[Dict[str, Dict[str, int]]],
+    coluna: Optional[str],
+    evento: str,
+) -> None:
+    if estatisticas is None or coluna is None:
+        return
+    estatisticas[coluna][evento] += 1
+
+
 def _converter_bytes_para_texto(
     valor: bytes,
     estatisticas: Optional[Dict[str, Dict[str, int]]] = None,
     coluna: Optional[str] = None,
+    log_fn: Optional[LogFunction] = None,
+    origem: str = "bytes",
 ) -> str:
     for codec in _TEXT_CODECS:
         try:
@@ -338,13 +350,16 @@ def _converter_bytes_para_texto(
             )
             continue
 
-        if estatisticas is not None and coluna is not None and codec != "utf-8":
-            estatisticas[coluna][f"codec:{codec}"] += 1
+        if codec != "utf-8":
+            _registrar_evento(estatisticas, coluna, f"codec:{origem}:{codec}")
         return texto
 
     texto = valor.decode("latin-1", errors="replace")
-    if estatisticas is not None and coluna is not None:
-        estatisticas[coluna]["indecifrado"] += 1
+    _registrar_evento(estatisticas, coluna, f"indecifrado:{origem}")
+    if log_fn is not None and coluna is not None:
+        mensagem = f"[WARN] Coluna '{coluna}' | Dados em {origem} foram decodificados com substituição."
+        log_fn(mensagem)
+        logging.warning(mensagem)
     return texto
 
 
@@ -386,6 +401,85 @@ def _tentar_decodificar_bytes(
     return texto
 
 
+def _eh_blob_reader(valor: object) -> bool:
+    tipo = type(valor)
+    nome_tipo = getattr(tipo, "__name__", "").lower()
+    modulo_tipo = getattr(tipo, "__module__", "").lower()
+    return (
+        hasattr(valor, "read")
+        and callable(getattr(valor, "read"))
+        and "blob" in nome_tipo
+        and ("fdb" in modulo_tipo or "fbcore" in modulo_tipo)
+    )
+
+
+def _converter_blob_para_texto(
+    valor: object,
+    coluna: str,
+    estatisticas: Dict[str, Dict[str, int]],
+    log_fn: LogFunction,
+) -> Optional[str]:
+    try:
+        conteudo = valor.read()
+    except Exception as erro:
+        _registrar_evento(estatisticas, coluna, "blob:erro-leitura")
+        mensagem = f"[WARN] Coluna '{coluna}' | Falha ao ler BlobReader: {erro}. Valor definido como None."
+        log_fn(mensagem)
+        logging.warning(mensagem, exc_info=True)
+        return None
+
+    if conteudo is None:
+        _registrar_evento(estatisticas, coluna, "blob:conteudo-nulo")
+        return None
+
+    if isinstance(conteudo, str):
+        _registrar_evento(estatisticas, coluna, "blob:texto")
+        return _sanear_string(conteudo, coluna, estatisticas, log_fn)
+
+    if isinstance(conteudo, memoryview):
+        conteudo = conteudo.tobytes()
+
+    if isinstance(conteudo, bytearray):
+        conteudo = bytes(conteudo)
+
+    if isinstance(conteudo, bytes):
+        _registrar_evento(estatisticas, coluna, "blob:bytes")
+        return _converter_bytes_para_texto(
+            conteudo,
+            estatisticas,
+            coluna,
+            log_fn=log_fn,
+            origem="blob",
+        )
+
+    _registrar_evento(estatisticas, coluna, "blob:tipo-desconhecido")
+    mensagem = f"[WARN] Coluna '{coluna}' | Tipo inesperado retornado pelo BlobReader: {type(conteudo)}."
+    log_fn(mensagem)
+    logging.warning(mensagem)
+    return str(conteudo)
+
+
+def _sanear_string(
+    valor: str,
+    coluna: str,
+    estatisticas: Dict[str, Dict[str, int]],
+    log_fn: Optional[LogFunction] = None,
+) -> str:
+    if "'" in valor:
+        _registrar_evento(estatisticas, coluna, "string:aspas-simples")
+
+    try:
+        valor.encode("utf-8")
+    except UnicodeEncodeError as erro:
+        _registrar_evento(estatisticas, coluna, "string:utf8-invalido")
+        if log_fn is not None:
+            mensagem = f"[WARN] Coluna '{coluna}' | Texto contém caracteres inválidos para UTF-8: {erro}. Valor mantido."
+            log_fn(mensagem)
+            logging.warning(mensagem)
+
+    return valor
+
+
 def _registrar_resumo_sanitizacao(
     estatisticas: Dict[str, Dict[str, int]], log_fn: LogFunction
 ) -> None:
@@ -394,13 +488,45 @@ def _registrar_resumo_sanitizacao(
         eventos = estatisticas[coluna]
         for chave_evento, quantidade in sorted(eventos.items()):
             if chave_evento.startswith("codec:"):
-                codec = chave_evento.split(":", 1)[1]
+                try:
+                    _, origem, codec = chave_evento.split(":", 2)
+                except ValueError:
+                    origem, codec = "desconhecido", chave_evento
                 mensagens.append(
-                    f"Coluna '{coluna}': {quantidade} valor(es) decodificado(s) com codec {codec}."
+                    f"Coluna '{coluna}': {quantidade} valor(es) de {origem} decodificado(s) com codec {codec}."
                 )
-            elif chave_evento == "indecifrado":
+            elif chave_evento.startswith("indecifrado:"):
+                origem = chave_evento.split(":", 1)[1]
                 mensagens.append(
-                    f"Coluna '{coluna}': {quantidade} valor(es) não pôde/puderam ser decodificados e permaneceram em bytes."
+                    f"Coluna '{coluna}': {quantidade} valor(es) de {origem} exigiram substituição durante a decodificação."
+                )
+            elif chave_evento == "blob:erro-leitura":
+                mensagens.append(
+                    f"Coluna '{coluna}': {quantidade} blob(s) não puderam ser lidos e foram definidos como None."
+                )
+            elif chave_evento == "blob:conteudo-nulo":
+                mensagens.append(
+                    f"Coluna '{coluna}': {quantidade} blob(s) retornaram conteúdo nulo."
+                )
+            elif chave_evento == "blob:bytes":
+                mensagens.append(
+                    f"Coluna '{coluna}': {quantidade} blob(s) foram convertidos a partir de bytes."
+                )
+            elif chave_evento == "blob:texto":
+                mensagens.append(
+                    f"Coluna '{coluna}': {quantidade} blob(s) já continham texto e foram mantidos."
+                )
+            elif chave_evento == "blob:tipo-desconhecido":
+                mensagens.append(
+                    f"Coluna '{coluna}': {quantidade} blob(s) retornaram tipo inesperado e foram convertidos via str()."
+                )
+            elif chave_evento == "string:aspas-simples":
+                mensagens.append(
+                    f"Coluna '{coluna}': {quantidade} texto(s) continham aspas simples; parâmetros seguros foram utilizados."
+                )
+            elif chave_evento == "string:utf8-invalido":
+                mensagens.append(
+                    f"Coluna '{coluna}': {quantidade} texto(s) apresentaram pontos de código inválidos para UTF-8."
                 )
 
     if not mensagens:
@@ -426,10 +552,58 @@ def sanitizar_lote(
         for indice_coluna, valor in enumerate(linha):
             if isinstance(valor, bytes):
                 coluna = colunas[indice_coluna]
-                texto = _converter_bytes_para_texto(valor, estatisticas, coluna)
+                texto = _converter_bytes_para_texto(
+                    valor,
+                    estatisticas,
+                    coluna,
+                    log_fn=log_fn,
+                    origem="bytes",
+                )
                 nova_linha.append(texto)
-            else:
-                nova_linha.append(valor)
+                continue
+
+            if isinstance(valor, memoryview):
+                coluna = colunas[indice_coluna]
+                texto = _converter_bytes_para_texto(
+                    valor.tobytes(),
+                    estatisticas,
+                    coluna,
+                    log_fn=log_fn,
+                    origem="bytes",
+                )
+                nova_linha.append(texto)
+                continue
+
+            if isinstance(valor, bytearray):
+                coluna = colunas[indice_coluna]
+                texto = _converter_bytes_para_texto(
+                    bytes(valor),
+                    estatisticas,
+                    coluna,
+                    log_fn=log_fn,
+                    origem="bytes",
+                )
+                nova_linha.append(texto)
+                continue
+
+            if _eh_blob_reader(valor):
+                coluna = colunas[indice_coluna]
+                texto_blob = _converter_blob_para_texto(
+                    valor,
+                    coluna,
+                    estatisticas,
+                    log_fn,
+                )
+                nova_linha.append(texto_blob)
+                continue
+
+            if isinstance(valor, str):
+                coluna = colunas[indice_coluna]
+                texto_limpo = _sanear_string(valor, coluna, estatisticas, log_fn)
+                nova_linha.append(texto_limpo)
+                continue
+
+            nova_linha.append(valor)
         lote_tratado.append(tuple(nova_linha))
 
     _registrar_resumo_sanitizacao(estatisticas, log_fn)

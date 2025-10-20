@@ -86,7 +86,10 @@ def test_sanitizar_lote_faz_fallback_para_latin1():
 
     assert resultado == [("café",)]
     assert mensagens[0] == "[WARN] Resumo de ajustes aplicados ao lote:"
-    assert any("codec latin-1" in mensagem for mensagem in mensagens[1:])
+    assert any(
+        "codec latin-1" in mensagem.lower() and "bytes" in mensagem.lower()
+        for mensagem in mensagens[1:]
+    )
 
 
 def test_sanitizar_lote_mantem_bytes_quando_decodificacao_falha():
@@ -98,4 +101,60 @@ def test_sanitizar_lote_mantem_bytes_quando_decodificacao_falha():
 
     assert resultado == [("\xff\x00\xfe",)]
     assert mensagens[0] == "[WARN] Resumo de ajustes aplicados ao lote:"
-    assert any("codec latin-1" in mensagem for mensagem in mensagens[1:])
+    assert any(
+        "bytes" in mensagem.lower() and "codec" in mensagem.lower()
+        for mensagem in mensagens[1:]
+    )
+
+
+def _criar_blob_reader(payload=None, should_fail=False):
+    class FakeBlobReader:
+        def __init__(self, conteudo=None, falhar=False):
+            self._conteudo = conteudo
+            self._falhar = falhar
+
+        def read(self):
+            if self._falhar:
+                raise RuntimeError("falha na leitura")
+            return self._conteudo
+
+    FakeBlobReader.__module__ = "fdb.fbcore"
+    return FakeBlobReader(payload, should_fail)
+
+
+def test_sanitizar_lote_converte_blob_para_texto():
+    log_fn, mensagens = _coletor_logs()
+    blob = _criar_blob_reader(b"dados")
+    lote = [(blob,)]
+    colunas = ["anexo"]
+
+    resultado = sanitizar_lote(lote, colunas, log_fn=log_fn)
+
+    assert resultado == [("dados",)]
+    assert mensagens[0] == "[WARN] Resumo de ajustes aplicados ao lote:"
+    assert any("blob" in mensagem.lower() for mensagem in mensagens[1:])
+
+
+def test_sanitizar_lote_blob_reader_falha_leitura():
+    log_fn, mensagens = _coletor_logs()
+    blob = _criar_blob_reader(should_fail=True)
+    lote = [(blob,)]
+    colunas = ["imagem"]
+
+    resultado = sanitizar_lote(lote, colunas, log_fn=log_fn)
+
+    assert resultado == [(None,)]
+    assert mensagens[0].startswith("[WARN] Coluna 'imagem'")
+    assert any("blob" in mensagem.lower() for mensagem in mensagens)
+
+
+def test_sanitizar_lote_preserva_strings_com_aspas():
+    log_fn, mensagens = _coletor_logs()
+    lote = [("O'Brien",)]
+    colunas = ["nome"]
+
+    resultado = sanitizar_lote(lote, colunas, log_fn=log_fn)
+
+    assert resultado == [("O'Brien",)]
+    assert mensagens[0] == "[WARN] Resumo de ajustes aplicados ao lote:"
+    assert any("aspas" in mensagem.lower() for mensagem in mensagens[1:])
